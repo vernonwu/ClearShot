@@ -12,3 +12,4 @@ tb-nightly
 tqdm
 einops
 yapf
+thop

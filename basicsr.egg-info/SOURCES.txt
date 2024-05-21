@@ -1,5 +1,6 @@
 LICENSE
 README.md
+license
 setup.cfg
 setup.py
 basicsr.egg-info/PKG-INFO

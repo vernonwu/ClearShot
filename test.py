@@ -4,14 +4,21 @@ import argparse
 from basicsr.models.archs.fftformer_arch import  fftformer
 from torchvision.transforms import functional as F
 from torch.utils.data import Dataset, DataLoader
+from thop import profile
 from PIL import Image as Image
 from tqdm import tqdm
+import numpy as np
+from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 
 
 class DeblurDataset(Dataset):
     def __init__(self, image_dir, transform=None, is_test=False):
         self.image_dir = image_dir
-        self.image_list = os.listdir(os.path.join(image_dir, 'input/'))
+        self.datasets = os.listdir(os.path.join(image_dir, 'input'))
+        self.image_list = []
+        for dataset in self.datasets:
+            image_list = os.listdir(os.path.join(image_dir, 'input', dataset))
+            self.image_list += [os.path.join(dataset, x) for x in image_list]
         self._check_image(self.image_list)
         self.image_list.sort()
         self.transform = transform
@@ -73,12 +80,15 @@ def main(args):
 
 def _eval(model, args):
     state_dict = torch.load(args.test_model)
-    model.load_state_dict(state_dict,strict = True)
-    device = torch.device( 'cuda')
-    dataloader = test_dataloader(args.data_dir, batch_size=1, num_workers=0)
+    model.load_state_dict(state_dict, strict=True)
+    device = torch.device('cuda')
+    dataloader = test_dataloader(args.data_dir, batch_size=1, num_workers=8)
     torch.cuda.empty_cache()
 
     model.eval()
+
+    psnr_scores = []
+    ssim_scores = []
 
     with torch.no_grad():
 
@@ -99,6 +109,15 @@ def _eval(model, args):
 
             pred_clip = torch.clamp(pred, 0, 1)
 
+            # Calculate PSNR
+            label_img = label_img.to(device)
+            psnr = peak_signal_noise_ratio(label_img.squeeze().cpu().numpy(), pred_clip.squeeze().cpu().numpy())
+            print(f'psnr score for iter {iter_idx} is {psnr}')
+            psnr_scores.append(psnr)
+
+            # # Calculate SSIM
+            # ssim = structural_similarity(label_img.squeeze().cpu().numpy(), pred_clip.squeeze().cpu().numpy(), multichannel=True)
+            # ssim_scores.append(ssim)
 
             if args.save_image:
                 save_name = os.path.join(args.result_dir, name[0])
@@ -106,16 +125,26 @@ def _eval(model, args):
                 pred = F.to_pil_image(pred_clip.squeeze(0).cpu(), 'RGB')
                 pred.save(save_name)
 
+            # flops, params = profile(model, inputs=(input_img,), verbose=False)
+            # print(f"FLOPs: {flops / 1e9:.2f} G")
+            # print(f"Parameter Size: {params / 1e6:.2f} M")
+
+    avg_psnr = np.mean(psnr_scores)
+    # avg_ssim = np.mean(ssim_scores)
+
+    print(f"Average PSNR: {avg_psnr:.2f}")
+    # print(f"Average SSIM: {avg_ssim:.4f}")
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
     # Directories
     parser.add_argument('--model_name', default='fftformer', type=str)
-    parser.add_argument('--data_dir', type=str, default='/media/kls/新加卷1/CVPR_2023/GoPro_test/')
+    parser.add_argument('--data_dir', type=str, default='./media/val/')
 
     # Test
-    parser.add_argument('--test_model', type=str, default='./pretrain_model/net_g_GoPro_HIDE.pth')
-    parser.add_argument('--save_image', type=bool, default=True, choices=[True, False])
+    parser.add_argument('--test_model', type=str, default='./pretrain_model/net_g_Realblur_R.pth')
+    parser.add_argument('--save_image', type=bool, default=False, choices=[True, False])
 
     args = parser.parse_args()
     args.result_dir = os.path.join('results/', args.model_name, 'GoPro/')
