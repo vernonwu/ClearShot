@@ -41,7 +41,7 @@ def calculate_psnr(img1,
         if len(img2.shape) == 4:
             img2 = img2.squeeze(0)
         img2 = img2.detach().cpu().numpy().transpose(1,2,0)
-        
+
     img1 = reorder_image(img1, input_order=input_order)
     img2 = reorder_image(img2, input_order=input_order)
     img1 = img1.astype(np.float64)
@@ -50,7 +50,7 @@ def calculate_psnr(img1,
     if crop_border != 0:
         img1 = img1[crop_border:-crop_border, crop_border:-crop_border, ...]
         img2 = img2[crop_border:-crop_border, crop_border:-crop_border, ...]
-    
+
     def _psnr(img1, img2):
         if test_y_channel:
             img1 = to_y_channel(img1)
@@ -61,7 +61,7 @@ def calculate_psnr(img1,
             return float('inf')
         max_value = 1. if img1.max() <= 1 else 255.
         return 20. * np.log10(max_value / np.sqrt(mse))
-    
+
     if img1.ndim == 3 and img1.shape[2] == 6:
         l1, r1 = img1[:,:,:3], img1[:,:,3:]
         l2, r2 = img2[:,:,:3], img2[:,:,3:]

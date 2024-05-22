@@ -2,13 +2,13 @@ import os
 import torch
 import argparse
 from basicsr.models.archs.fftformer_arch import  fftformer
+from basicsr.metrics.psnr_ssim import calculate_psnr, calculate_ssim
 from torchvision.transforms import functional as F
 from torch.utils.data import Dataset, DataLoader
 from thop import profile
 from PIL import Image as Image
 from tqdm import tqdm
 import numpy as np
-from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 
 
 class DeblurDataset(Dataset):
@@ -111,13 +111,13 @@ def _eval(model, args):
 
             # Calculate PSNR
             label_img = label_img.to(device)
-            psnr = peak_signal_noise_ratio(label_img.squeeze().cpu().numpy(), pred_clip.squeeze().cpu().numpy())
+            psnr = calculate_psnr(label_img, pred_clip)
             print(f'psnr score for iter {iter_idx} is {psnr}')
             psnr_scores.append(psnr)
 
-            # # Calculate SSIM
-            # ssim = structural_similarity(label_img.squeeze().cpu().numpy(), pred_clip.squeeze().cpu().numpy(), multichannel=True)
-            # ssim_scores.append(ssim)
+            # Calculate SSIM
+            ssim = calculate_ssim(label_img, pred_clip)
+            ssim_scores.append(ssim)
 
             if args.save_image:
                 save_name = os.path.join(args.result_dir, name[0])
@@ -130,10 +130,10 @@ def _eval(model, args):
             # print(f"Parameter Size: {params / 1e6:.2f} M")
 
     avg_psnr = np.mean(psnr_scores)
-    # avg_ssim = np.mean(ssim_scores)
+    avg_ssim = np.mean(ssim_scores)
 
     print(f"Average PSNR: {avg_psnr:.2f}")
-    # print(f"Average SSIM: {avg_ssim:.4f}")
+    print(f"Average SSIM: {avg_ssim:.4f}")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
