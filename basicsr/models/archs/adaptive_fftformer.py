@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numbers
 from einops import rearrange
-from basicsr.models.archs.fftformer_arch import fftformer
+from basicsr.models.archs.fftformer_arch import *
 from basicsr.models.archs.adapter import SpatialPriorModule
 from basicsr.models.archs.adapter import InteractionBlock
 from basicsr.models.archs.adapter import deform_inputs
@@ -83,8 +83,12 @@ class Adaptive_FFTFormer(nn.Module):
         self.spm.apply(self._init_weights)
         self.interactions.apply(self._init_weights)
 
-        self.load_pretrained_weights(pretrained)
+        # inherit all the layers from the pretrained model
+        named_layers = dict(self.pretrained_model.named_children())
+        for name, layer in named_layers.items():
+            setattr(self, name, layer)
 
+        self.load_pretrained_weights(pretrained)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):

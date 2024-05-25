@@ -1,7 +1,7 @@
 import os
 import torch
 import argparse
-from basicsr.models.archs.fftformer_arch import  fftformer
+from basicsr.models.archs.adaptive_fftformer import Adaptive_FFTFormer
 from basicsr.metrics.psnr_ssim import calculate_psnr, calculate_ssim
 from torchvision.transforms import functional as F
 from torch.utils.data import Dataset, DataLoader
@@ -71,21 +71,18 @@ def main(args):
     if not os.path.exists(args.result_dir):
         os.makedirs(args.result_dir)
 
-    model = fftformer()
-    # print(model)
+    model = Adaptive_FFTFormer(pretrained=args.test_model)
+    print(model)
     if torch.cuda.is_available():
         model.cuda()
 
     _eval(model, args)
 
 def _eval(model, args):
-    state_dict = torch.load(args.test_model)
-    model.load_state_dict(state_dict, strict=True)
+
     device = torch.device('cuda')
     dataloader = test_dataloader(args.data_dir, batch_size=1, num_workers=8)
     torch.cuda.empty_cache()
-
-    model.eval()
 
     psnr_scores = []
     ssim_scores = []
@@ -143,7 +140,7 @@ if __name__ == '__main__':
     parser.add_argument('--data_dir', type=str, default='./media/val/')
 
     # Test
-    parser.add_argument('--test_model', type=str, default='./pretrain_model/net_g_Realblur_R.pth')
+    parser.add_argument('--test_model', type=str, default='./pretrain_model/net_g_Realblur_J.pth')
     parser.add_argument('--save_image', type=bool, default=False, choices=[True, False])
 
     args = parser.parse_args()
