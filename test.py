@@ -1,7 +1,7 @@
 import os
 import torch
 import argparse
-from basicsr.models.archs.adaptive_fftformer import Adaptive_FFTFormer
+from basicsr.models.archs.fftformer_arch import  fftformer
 from basicsr.metrics.psnr_ssim import calculate_psnr, calculate_ssim
 from torchvision.transforms import functional as F
 from torch.utils.data import Dataset, DataLoader
@@ -9,6 +9,7 @@ from thop import profile
 from PIL import Image as Image
 from tqdm import tqdm
 import numpy as np
+from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 
 
 class DeblurDataset(Dataset):
@@ -23,14 +24,11 @@ class DeblurDataset(Dataset):
         self.image_list.sort()
         self.transform = transform
         self.is_test = is_test
-
     def __len__(self):
         return len(self.image_list)
-
     def __getitem__(self, idx):
         image = Image.open(os.path.join(self.image_dir, 'input', self.image_list[idx]))
         label = Image.open(os.path.join(self.image_dir, 'target', self.image_list[idx]))
-
         if self.transform:
             image, label = self.transform(image, label)
         else:
@@ -40,14 +38,13 @@ class DeblurDataset(Dataset):
             name = self.image_list[idx]
             return image, label, name
         return image, label
-
     @staticmethod
     def _check_image(lst):
         for x in lst:
             splits = x.split('.')
             if splits[-1] not in ['png', 'jpg', 'jpeg']:
                 raise ValueError
-
+            
 
 def test_dataloader(path, batch_size=1, num_workers=0):
     image_dir = os.path.join(path, 'test')
@@ -61,7 +58,6 @@ def test_dataloader(path, batch_size=1, num_workers=0):
     return dataloader
 
 
-
 def main(args):
     # CUDNN
     # cudnn.benchmark = True
@@ -70,19 +66,22 @@ def main(args):
         os.makedirs('results/' + args.model_name + '/')
     if not os.path.exists(args.result_dir):
         os.makedirs(args.result_dir)
-
-    model = Adaptive_FFTFormer(pretrained=args.test_model)
-    print(model)
+    model = fftformer()
+    # print(model)
     if torch.cuda.is_available():
         model.cuda()
-
     _eval(model, args)
 
 def _eval(model, args):
 
+    state_dict = torch.load(args.test_model)
+    model.load_state_dict(state_dict, strict=True)
+
     device = torch.device('cuda')
     dataloader = test_dataloader(args.data_dir, batch_size=1, num_workers=8)
+
     torch.cuda.empty_cache()
+    model.eval()
 
     psnr_scores = []
     ssim_scores = []
@@ -108,13 +107,14 @@ def _eval(model, args):
 
             # Calculate PSNR
             label_img = label_img.to(device)
-            psnr = calculate_psnr(label_img, pred_clip)
-            print(f'psnr score for iter {iter_idx} is {psnr}')
+            crop_border = 4
+            psnr = calculate_psnr(label_img, pred_clip,crop_border=crop_border)
             psnr_scores.append(psnr)
-
             # Calculate SSIM
-            ssim = calculate_ssim(label_img, pred_clip)
+            ssim = calculate_ssim(label_img, pred_clip,crop_border=crop_border)
             ssim_scores.append(ssim)
+
+            print(f'iter {iter_idx} : psnr={psnr}, ssim={ssim}')
 
             if args.save_image:
                 save_name = os.path.join(args.result_dir, name[0])

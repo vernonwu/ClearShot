@@ -13,3 +13,5 @@ tqdm
 einops
 yapf
 thop
+timm
+mmcv
