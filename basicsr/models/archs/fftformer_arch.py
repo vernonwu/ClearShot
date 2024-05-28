@@ -228,6 +228,7 @@ class fftformer(nn.Module):
         super(fftformer, self).__init__()
 
         self.patch_embed = OverlapPatchEmbed(inp_channels, dim)
+        self.inp_channels = inp_channels
 
         self.encoder_level1 = nn.Sequential(*[
             TransformerBlock(dim=dim, ffn_expansion_factor=ffn_expansion_factor, bias=bias) for i in
@@ -242,6 +243,8 @@ class fftformer(nn.Module):
         self.encoder_level3 = nn.Sequential(*[
             TransformerBlock(dim=int(dim * 2 ** 2), ffn_expansion_factor=ffn_expansion_factor,
                              bias=bias) for i in range(num_blocks[2])])
+        
+        self.encoder_blocks = [self.encoder_level1, self.encoder_level2, self.encoder_level3]
 
         self.decoder_level3 = nn.Sequential(*[
             TransformerBlock(dim=int(dim * 2 ** 2), ffn_expansion_factor=ffn_expansion_factor,
@@ -270,13 +273,13 @@ class fftformer(nn.Module):
     def forward(self, inp_img):
 
         inp_enc_level1 = self.patch_embed(inp_img)
-        out_enc_level1 = self.encoder_level1(inp_enc_level1)
+        out_enc_level1 = self.encoder_blocks[0](inp_enc_level1)
 
         inp_enc_level2 = self.down1_2(out_enc_level1)
-        out_enc_level2 = self.encoder_level2(inp_enc_level2)
+        out_enc_level2 = self.encoder_blocks[1](inp_enc_level2)
 
         inp_enc_level3 = self.down2_3(out_enc_level2)
-        out_enc_level3 = self.encoder_level3(inp_enc_level3)
+        out_enc_level3 = self.encoder_blocks[2](inp_enc_level3)
 
         out_dec_level3 = self.decoder_level3(out_enc_level3)
 

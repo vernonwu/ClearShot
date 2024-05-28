@@ -6,6 +6,7 @@ from einops import rearrange
 from basicsr.models.archs.fftformer_arch import *
 from basicsr.models.archs.adapter import SpatialPriorModule
 from basicsr.models.archs.adapter import InteractionBlock
+from functools import partial
 from basicsr.models.archs.adapter import deform_inputs
 from timm.models.layers import trunc_normal_
 import math
@@ -24,7 +25,7 @@ class OverlapPatchEmbed(nn.Module):
 
         return x,H,W
 
-class Adaptive_FFTFormer(nn.Module):
+class Adaptive_FFTFormer(fftformer):
     def __init__(self,
                  inp_channels=3,
                  out_channels=3,
@@ -39,7 +40,7 @@ class Adaptive_FFTFormer(nn.Module):
                  n_points=4,
                  deform_num_heads=6,
                  init_values=0.,
-                 interaction_indexes=None,
+                 interaction_indexes=[[0, 1], [1, 2]],
                  with_cffn=True,
                  cffn_ratio=0.25,
                  deform_ratio=1.0,
@@ -51,21 +52,23 @@ class Adaptive_FFTFormer(nn.Module):
                  **kwargs):
         super(Adaptive_FFTFormer, self).__init__()
 
-        self.pretrained_model = fftformer(inp_channels,
-                 out_channels,
-                 dim,
-                 num_blocks,
-                 num_refinement_blocks,
-                 ffn_expansion_factor,
-                 bias=False)
+        # self.pretrained_model = fftformer(inp_channels,
+        #          out_channels,
+        #          dim,
+        #          num_blocks,
+        #          num_refinement_blocks,
+        #          ffn_expansion_factor,
+        #          bias=False)
+        self.drop_path_rate = 0.2
+        self.interaction_indexes = interaction_indexes
 
-        self.spm = SpatialPriorModule(inplanes=conv_inplane, embed_dim=dim, with_cp=False)
+        self.spm = SpatialPriorModule(inplanes=conv_inplane, embed_dim=dim)
         self.level_embed = nn.Parameter(torch.zeros(3, dim))
 
         self.interactions = nn.Sequential(*[
             InteractionBlock(dim=dim, num_heads=deform_num_heads, n_points=n_points,
                              init_values=init_values, drop_path=self.drop_path_rate,
-                             norm_layer=self.norm_layer, with_cffn=with_cffn,
+                             with_cffn=with_cffn, norm_layer=partial(nn.LayerNorm, eps=1e-6),
                              cffn_ratio=cffn_ratio, deform_ratio=deform_ratio,
                              extra_extractor=((True if i == len(interaction_indexes) - 1
                                                else False) and use_extra_extractor),
@@ -78,17 +81,26 @@ class Adaptive_FFTFormer(nn.Module):
         self.norm2 = nn.SyncBatchNorm(dim)
         self.norm3 = nn.SyncBatchNorm(dim)
         self.norm4 = nn.SyncBatchNorm(dim)
+        self.adapter_patch_embed = OverlapPatchEmbed(self.inp_channels, dim)
 
         self.up.apply(self._init_weights)
         self.spm.apply(self._init_weights)
         self.interactions.apply(self._init_weights)
 
+        #TODO: initialize self.blocks with encoder blocks.
+
         # inherit all the layers from the pretrained model
-        named_layers = dict(self.pretrained_model.named_children())
+        named_layers = dict(self.named_children())
         for name, layer in named_layers.items():
             setattr(self, name, layer)
 
         self.load_pretrained_weights(pretrained)
+
+    def _add_level_embed(self, c2, c3, c4):
+        c2 = c2 + self.level_embed[0]
+        c3 = c3 + self.level_embed[1]
+        c4 = c4 + self.level_embed[2]
+        return c2, c3, c4
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -120,16 +132,19 @@ class Adaptive_FFTFormer(nn.Module):
     def forward(self, x):
         deform_inputs1, deform_inputs2 = deform_inputs(x)
 
+        #TODO: fit dims
+
         c2, c3, c4 = self.spm(x)
         c2, c3, c4 = self._add_level_embed(c2, c3, c4)
         c = torch.cat([c2, c3, c4], dim=1)
 
-        x, H, W = self.patch_embed(x)
-        bs, n, dim = x.shape
+        x, H, W = self.adapter_patch_embed(x)
+        print(x.shape)
+        bs, dim, _, _ = x.shape
 
         for i, layer in enumerate(self.interactions):
             indexes = self.interaction_indexes[i]
-            x, c = layer(x, c, self.blocks[indexes[0]:indexes[-1] + 1],
+            x, c = layer(x, c, self.encoder_blocks[indexes[0]:indexes[-1] + 1],
                          deform_inputs1, deform_inputs2, H, W)
 
         # Split & Reshape

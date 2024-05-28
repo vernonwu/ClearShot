@@ -129,7 +129,7 @@ class Injector(nn.Module):
                  norm_layer=partial(nn.LayerNorm, eps=1e-6), init_values=0., with_cp=False):
         super().__init__()
         self.with_cp = with_cp
-        self.query_norm = norm_layer(dim)
+        self.query_norm = norm_layer(normalized_shape=(1, dim, 736, 1280))
         self.feat_norm = norm_layer(dim)
         self.attn = MSDeformAttn(d_model=dim, n_levels=n_levels, n_heads=num_heads,
                                  n_points=n_points, ratio=deform_ratio)
@@ -179,7 +179,7 @@ class InteractionBlock(nn.Module):
                           feat=c, spatial_shapes=deform_inputs1[1],
                           level_start_index=deform_inputs1[2])
         for idx, blk in enumerate(blocks):
-            x = blk(x, H, W)
+            x = blk(x)
         c = self.extractor(query=c, reference_points=deform_inputs2[0],
                            feat=x, spatial_shapes=deform_inputs2[1],
                            level_start_index=deform_inputs2[2], H=H, W=W)
