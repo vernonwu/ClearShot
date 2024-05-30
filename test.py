@@ -44,7 +44,7 @@ class DeblurDataset(Dataset):
             splits = x.split('.')
             if splits[-1] not in ['png', 'jpg', 'jpeg']:
                 raise ValueError
-            
+
 
 def test_dataloader(path, batch_size=1, num_workers=0):
     image_dir = os.path.join(path, 'test')

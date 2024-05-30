@@ -36,11 +36,11 @@ class Adaptive_FFTFormer(fftformer):
                  bias=False,
                  pretrain_size=224,
                  num_heads=12,
-                 conv_inplane=64,
+                 conv_inplane=48,
                  n_points=4,
                  deform_num_heads=6,
                  init_values=0.,
-                 interaction_indexes=[[0, 1], [1, 2]],
+                 interaction_indexes=[[0, 0], [1, 2],[3, 4]],
                  with_cffn=True,
                  cffn_ratio=0.25,
                  deform_ratio=1.0,
@@ -80,14 +80,11 @@ class Adaptive_FFTFormer(fftformer):
         self.norm1 = nn.SyncBatchNorm(dim)
         self.norm2 = nn.SyncBatchNorm(dim)
         self.norm3 = nn.SyncBatchNorm(dim)
-        self.norm4 = nn.SyncBatchNorm(dim)
         self.adapter_patch_embed = OverlapPatchEmbed(self.inp_channels, dim)
 
         self.up.apply(self._init_weights)
         self.spm.apply(self._init_weights)
         self.interactions.apply(self._init_weights)
-
-        #TODO: initialize self.blocks with encoder blocks.
 
         # inherit all the layers from the pretrained model
         named_layers = dict(self.named_children())
@@ -132,11 +129,9 @@ class Adaptive_FFTFormer(fftformer):
     def forward(self, x):
         deform_inputs1, deform_inputs2 = deform_inputs(x)
 
-        #TODO: fit dims
-
-        c2, c3, c4 = self.spm(x)
-        c2, c3, c4 = self._add_level_embed(c2, c3, c4)
-        c = torch.cat([c2, c3, c4], dim=1)
+        c1, c2, c3 = self.spm(x)
+        c1, c2, c3 = self._add_level_embed(c1, c2, c3)
+        c = torch.cat([c1, c2, c3], dim=1)
 
         x, H, W = self.adapter_patch_embed(x)
         print(x.shape)
@@ -144,33 +139,33 @@ class Adaptive_FFTFormer(fftformer):
 
         for i, layer in enumerate(self.interactions):
             indexes = self.interaction_indexes[i]
-            x, c = layer(x, c, self.encoder_blocks[indexes[0]:indexes[-1] + 1],
-                         deform_inputs1, deform_inputs2, H, W)
+            x, c = layer(x, c, self.blocks[indexes[0]:indexes[-1] + 1],
+                         deform_inputs1, deform_inputs2, H/2^i, W/2^i)
 
         # Split & Reshape
-        c2 = c[:, 0:c2.size(1), :]
-        c3 = c[:, c2.size(1):c2.size(1) + c3.size(1), :]
-        c4 = c[:, c2.size(1) + c3.size(1):, :]
+        c1 = c[:, 0:c1.size(1), :]
+        c2 = c[:, c1.size(1):c1.size(1) + c2.size(1), :]
+        c3 = c[:, c1.size(1) + c2.size(1):, :]
 
-        c2 = c2.transpose(1, 2).view(bs, dim, H * 2, W * 2).contiguous()
+        c1 = c1.transpose(1, 2).view(bs, dim*4, H // 4, W // 4).contiguous()
+        c2 = c2.transpose(1, 2).view(bs, dim*2, H // 2, W // 2).contiguous()
         c3 = c3.transpose(1, 2).view(bs, dim, H, W).contiguous()
-        c4 = c4.transpose(1, 2).view(bs, dim, H // 2, W // 2).contiguous()
 
+        f1 = self.norm1(c1)
         f2 = self.norm2(c2)
         f3 = self.norm3(c3)
-        f4 = self.norm4(c4)
 
-        out_dec_level3 = self.decoder_level3(f4)
+        out_dec_level3 = self.decoder_level3(f3)
 
         inp_dec_level2 = self.up3_2(out_dec_level3)
 
-        inp_dec_level2 = self.fuse2(inp_dec_level2, f3)
+        inp_dec_level2 = self.fuse2(inp_dec_level2, f2)
 
         out_dec_level2 = self.decoder_level2(inp_dec_level2)
 
         inp_dec_level1 = self.up2_1(out_dec_level2)
 
-        inp_dec_level1 = self.fuse1(inp_dec_level1, f2)
+        inp_dec_level1 = self.fuse1(inp_dec_level1, f1)
         out_dec_level1 = self.decoder_level1(inp_dec_level1)
 
         out_dec_level1 = self.refinement(out_dec_level1)
