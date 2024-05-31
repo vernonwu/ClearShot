@@ -10,15 +10,11 @@ from torch.nn.init import constant_, xavier_uniform_
 from torch.autograd import Function
 from torch.autograd.function import once_differentiable
 from torch.cuda.amp import custom_bwd, custom_fwd
+from mmcv.ops.multi_scale_deform_attn import MultiScaleDeformableAttention as MSDA
+from mmcv.utils import ext_loader
 
-try:
-    from mmcv.ops.multi_scale_deform_attn import MultiScaleDeformableAttention as MSDA
-
-except ImportError:
-    warnings.warn(
-        '`MultiScaleDeformableAttention` in MMCV has been moved to '
-        '`mmcv.ops.multi_scale_deform_attn`, please update your MMCV')
-    from mmcv.cnn.bricks.transformer import MultiScaleDeformableAttention as MSDA
+ext_module = ext_loader.load_ext(
+    '_ext', ['ms_deform_attn_backward', 'ms_deform_attn_forward'])
 
 class MSDeformAttnFunction(Function):
     @staticmethod
@@ -26,7 +22,7 @@ class MSDeformAttnFunction(Function):
     def forward(ctx, value, value_spatial_shapes, value_level_start_index,
                 sampling_locations, attention_weights, im2col_step):
         ctx.im2col_step = im2col_step
-        output = MSDA.ms_deform_attn_forward(value, value_spatial_shapes,
+        output = ext_module.ms_deform_attn_forward(value, value_spatial_shapes,
                                              value_level_start_index,
                                              sampling_locations,
                                              attention_weights,
@@ -43,7 +39,7 @@ class MSDeformAttnFunction(Function):
         value, value_spatial_shapes, value_level_start_index, \
         sampling_locations, attention_weights = ctx.saved_tensors
         grad_value, grad_sampling_loc, grad_attn_weight = \
-            MSDA.ms_deform_attn_backward(
+            ext_module.ms_deform_attn_backward(
                 value, value_spatial_shapes, value_level_start_index,
                 sampling_locations, attention_weights, grad_output, ctx.im2col_step)
 
@@ -154,7 +150,6 @@ class MSDeformAttn(nn.Module):
         N, Len_in, _ = input_flatten.shape
         assert (input_spatial_shapes[:, 0] *
                 input_spatial_shapes[:, 1]).sum() == Len_in
-
         value = self.value_proj(input_flatten)
         if input_padding_mask is not None:
             value = value.masked_fill(input_padding_mask[..., None], float(0))

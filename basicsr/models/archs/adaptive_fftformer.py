@@ -11,7 +11,6 @@ from basicsr.models.archs.adapter import deform_inputs
 from timm.models.layers import trunc_normal_
 import math
 from basicsr.models.archs.ms_deform_attn import MSDeformAttn
-# TODO: find out which version of the MSDeformAttn it's using
 
 class OverlapPatchEmbed(nn.Module):
     def __init__(self, in_c=3, embed_dim=48, bias=False):
@@ -21,9 +20,7 @@ class OverlapPatchEmbed(nn.Module):
 
     def forward(self, x):
         x = self.proj(x)
-        _, _, H, W = x.shape
-
-        return x,H,W
+        return x
 
 class Adaptive_FFTFormer(fftformer):
     def __init__(self,
@@ -66,12 +63,11 @@ class Adaptive_FFTFormer(fftformer):
         self.level_embed = nn.Parameter(torch.zeros(3, dim))
 
         self.interactions = nn.Sequential(*[
-            InteractionBlock(dim=dim, num_heads=deform_num_heads, n_points=n_points,
+            InteractionBlock(dim=dim*(2**i), num_heads=deform_num_heads, n_points=n_points,
                              init_values=init_values, drop_path=self.drop_path_rate,
                              with_cffn=with_cffn, norm_layer=partial(nn.LayerNorm, eps=1e-6),
-                             cffn_ratio=cffn_ratio, deform_ratio=deform_ratio,
-                             extra_extractor=((True if i == len(interaction_indexes) - 1
-                                               else False) and use_extra_extractor),
+                             cffn_ratio=cffn_ratio, deform_ratio=deform_ratio, extra_extractor= False,
+                             patch_merge = (False if i == 0 else True),
                              with_cp=with_cp)
             for i in range(len(interaction_indexes))
         ])
@@ -127,20 +123,19 @@ class Adaptive_FFTFormer(fftformer):
             m._reset_parameters()
 
     def forward(self, x):
-        deform_inputs1, deform_inputs2 = deform_inputs(x)
 
         c1, c2, c3 = self.spm(x)
         c1, c2, c3 = self._add_level_embed(c1, c2, c3)
         c = torch.cat([c1, c2, c3], dim=1)
-
-        x, H, W = self.adapter_patch_embed(x)
-        print(x.shape)
-        bs, dim, _, _ = x.shape
+        x = self.adapter_patch_embed(x)
 
         for i, layer in enumerate(self.interactions):
+            deform_inputs1, deform_inputs2 = deform_inputs(x)
             indexes = self.interaction_indexes[i]
+            bs, dim, H, W = x.shape
             x, c = layer(x, c, self.blocks[indexes[0]:indexes[-1] + 1],
-                         deform_inputs1, deform_inputs2, H/2^i, W/2^i)
+                         deform_inputs1, deform_inputs2, H, W)
+            print(c.shape)
 
         # Split & Reshape
         c1 = c[:, 0:c1.size(1), :]
