@@ -3,6 +3,7 @@ from functools import partial
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from basicsr.models.archs.ms_deform_attn import MSDeformAttn
 from timm.models.layers import DropPath
 from einops import rearrange
@@ -24,32 +25,56 @@ def unflatten(x,h,w):
     return rearrange(x, 'b (h w) c -> b c h w', h=h, w=w)
 
 class PatchMerging(nn.Module):
-    def __init__(self, input_dim):
+    """Patch merging inspired by swin Transformer.
+    """
+    def __init__(self, embed_dim):
         super(PatchMerging, self).__init__()
-        self.conv = nn.Conv2d(input_dim, input_dim*2, kernel_size=2, stride=2, bias=False)
-
+        self.layer_norm = nn.LayerNorm(embed_dim * 4)
+        self.conv = nn.Conv1d(embed_dim * 4, embed_dim * 2, kernel_size=1)
+        
     def forward(self, x):
         B, N, C = x.shape
-        assert N % 4 == 0, "The sequence length N must be divisible by 4"
         
-        # Reshape x to (B, N/4, 2, 2, C)
-        x = x.view(B, N // 4, 2, 2, C)
+        # Pad if necessary to make N a multiple of 4
+        if N % 4 != 0:
+            padding_size = 4 - (N % 4)
+            x = nn.functional.pad(x, (0, 0, 0, padding_size))
+            N += padding_size
         
-        # Permute to (B, C, N/4, 2, 2)
-        x = x.permute(0, 4, 1, 2, 3)
+        # Reshape to [B, N/4, 4C]
+        x = x.contiguous().view(B, N // 4, 4 * C)
         
-        # Reshape to (B, C, N/4, 4)
-        x = x.contiguous().view(B, C, N // 4, 4)
+        # Apply layer normalization
+        x = self.layer_norm(x)
         
-        # Apply convolution to reduce the last dimension from 4 to 2 * C
-        x = self.conv(x.permute(0, 2, 3, 1).contiguous().view(B * N // 4, 2, 2, C).permute(0, 3, 1, 2))
+        # Reshape for convolution [B, 4C, N/4]
+        x = x.permute(0, 2, 1)
         
-        # Reshape back to (B, N/4, 2*C)
-        x = x.view(B, N // 4, -1)
-        
+        # Apply convolution
+        x = self.conv(x)
+
+        # Reshape back to [B, N/4, 2C]
+        x = x.permute(0, 2, 1)
+
         return x
 
-
+def interpolate_tensor(input_tensor, output_dim):
+    # Ensure the input tensor is of shape [B, input_dim, C]
+    assert input_tensor.dim() == 3, "Input tensor must be 3-dimensional"
+    
+    B, input_dim, C = input_tensor.shape
+    
+    # Permute the tensor to shape [B, C, input_dim] for interpolation
+    input_tensor = input_tensor.permute(0, 2, 1)
+    
+    # Perform interpolation along the dimension to be changed
+    interpolated_tensor = F.interpolate(input_tensor, size=output_dim, mode='linear', align_corners=True)
+    
+    # Permute back to the original shape [B, output_dim, C]
+    interpolated_tensor = interpolated_tensor.permute(0, 2, 1)
+    
+    return interpolated_tensor
+    
 def get_reference_points(spatial_shapes, device):
     reference_points_list = []
     for lvl, (H_, W_) in enumerate(spatial_shapes):
@@ -124,7 +149,7 @@ class DWConv(nn.Module):
         x2 = self.dwconv(x2).flatten(2).transpose(1, 2)
         x3 = self.dwconv(x3).flatten(2).transpose(1, 2)
         x = torch.cat([x1, x2, x3], dim=1)
-        return x
+        return x 
 
 
 class Extractor(nn.Module):
@@ -215,7 +240,7 @@ class InteractionBlock(nn.Module):
             self.extra_extractors = None
 
         if patch_merge:
-            self.patch_merger = PatchMerging(input_dim = dim//2)
+            self.patch_merger = PatchMerging(embed_dim = dim//2)
         else:
             self.patch_merger = None
 
@@ -230,13 +255,15 @@ class InteractionBlock(nn.Module):
         for idx, blk in enumerate(blocks):
             x = blk(x)
 
+        deform_inputs1, deform_inputs2 = deform_inputs(x)
+        adjusted_dim = deform_inputs2[0].shape[1]
+
         if self.patch_merger is not None:
             H = H // 2
             W = W // 2
             c = self.patch_merger(c)
-            print(c.shape, 'merged')
-            
-        deform_inputs1, deform_inputs2 = deform_inputs(x)
+            c = interpolate_tensor(c, adjusted_dim)
+        
         x = flatten(x)
 
         c = self.extractor(query=c, reference_points=deform_inputs2[0],

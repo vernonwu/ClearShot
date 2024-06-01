@@ -38,7 +38,7 @@ class Adaptive_FFTFormer(fftformer):
                  deform_num_heads=6,
                  init_values=0.,
                  interaction_indexes=[[0, 0], [1, 2],[3, 4]],
-                 with_cffn=True,
+                 with_cffn= False,
                  cffn_ratio=0.25,
                  deform_ratio=1.0,
                  add_vit_feature=True,
@@ -74,8 +74,8 @@ class Adaptive_FFTFormer(fftformer):
 
         self.up = nn.ConvTranspose2d(dim, dim, 2, 2)
         self.norm1 = nn.SyncBatchNorm(dim)
-        self.norm2 = nn.SyncBatchNorm(dim)
-        self.norm3 = nn.SyncBatchNorm(dim)
+        self.norm2 = nn.SyncBatchNorm(dim*2)
+        self.norm3 = nn.SyncBatchNorm(dim*4)
         self.adapter_patch_embed = OverlapPatchEmbed(self.inp_channels, dim)
 
         self.up.apply(self._init_weights)
@@ -127,28 +127,21 @@ class Adaptive_FFTFormer(fftformer):
         c1, c2, c3 = self.spm(x)
         c1, c2, c3 = self._add_level_embed(c1, c2, c3)
         c = torch.cat([c1, c2, c3], dim=1)
+        input_img = x
         x = self.adapter_patch_embed(x)
 
+        encoder_list = []
         for i, layer in enumerate(self.interactions):
             deform_inputs1, deform_inputs2 = deform_inputs(x)
             indexes = self.interaction_indexes[i]
             bs, dim, H, W = x.shape
             x, c = layer(x, c, self.blocks[indexes[0]:indexes[-1] + 1],
                          deform_inputs1, deform_inputs2, H, W)
-            print(c.shape)
+            encoder_list.append(x)
 
-        # Split & Reshape
-        c1 = c[:, 0:c1.size(1), :]
-        c2 = c[:, c1.size(1):c1.size(1) + c2.size(1), :]
-        c3 = c[:, c1.size(1) + c2.size(1):, :]
-
-        c1 = c1.transpose(1, 2).view(bs, dim*4, H // 4, W // 4).contiguous()
-        c2 = c2.transpose(1, 2).view(bs, dim*2, H // 2, W // 2).contiguous()
-        c3 = c3.transpose(1, 2).view(bs, dim, H, W).contiguous()
-
-        f1 = self.norm1(c1)
-        f2 = self.norm2(c2)
-        f3 = self.norm3(c3)
+        f1 = self.norm1(encoder_list[0])
+        f2 = self.norm2(encoder_list[1])
+        f3 = self.norm3(encoder_list[2])
 
         out_dec_level3 = self.decoder_level3(f3)
 
@@ -165,7 +158,7 @@ class Adaptive_FFTFormer(fftformer):
 
         out_dec_level1 = self.refinement(out_dec_level1)
 
-        out_dec_level1 = self.output(out_dec_level1) + x
+        out_dec_level1 = self.output(out_dec_level1) + input_img
 
         return out_dec_level1
 
