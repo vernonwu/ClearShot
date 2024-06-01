@@ -81,11 +81,12 @@ class Adaptive_FFTFormer(fftformer):
         self.up.apply(self._init_weights)
         self.spm.apply(self._init_weights)
         self.interactions.apply(self._init_weights)
+        self.apply(self._init_deform_weights)
 
-        # inherit all the layers from the pretrained model
-        named_layers = dict(self.named_children())
-        for name, layer in named_layers.items():
-            setattr(self, name, layer)
+        # # inherit all the layers from the pretrained model
+        # named_layers = dict(self.named_children())
+        # for name, layer in named_layers.items():
+        #     setattr(self, name, layer)
 
         self.load_pretrained_weights(pretrained)
 
@@ -106,6 +107,11 @@ class Adaptive_FFTFormer(fftformer):
         elif isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
             fan_out = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
             fan_out //= m.groups
+            m.weight.data.normal_(0, math.sqrt(2.0 / fan_out))
+            if m.bias is not None:
+                m.bias.data.zero_()
+        elif isinstance(m, nn.Conv1d):
+            fan_out = m.kernel_size[0] * m.out_channels
             m.weight.data.normal_(0, math.sqrt(2.0 / fan_out))
             if m.bias is not None:
                 m.bias.data.zero_()
