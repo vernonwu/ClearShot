@@ -128,12 +128,13 @@ class Adaptive_FFTFormer(fftformer):
         if isinstance(m, MSDeformAttn):
             m._reset_parameters()
 
-    def forward(self, x):
+    def forward(self, input_img):
 
-        c1, c2, c3 = self.spm(x)
+        c1, c2, c3 = self.spm(input_img)
         c1, c2, c3 = self._add_level_embed(c1, c2, c3)
         c = torch.cat([c1, c2, c3], dim=1)
-        input_img = x
+        
+        x = input_img
         x = self.adapter_patch_embed(x)
 
         encoder_list = []
