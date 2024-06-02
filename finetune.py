@@ -12,7 +12,7 @@ import numpy as np
 
 
 class DeblurDataset(Dataset):
-    def __init__(self, image_dir, transform=None, is_test=False):
+    def __init__(self, image_dir, transform=None, is_test=False, require_label=True):
         self.image_dir = image_dir
         self.datasets = os.listdir(os.path.join(image_dir, 'input'))
         self.image_list = []
@@ -23,21 +23,28 @@ class DeblurDataset(Dataset):
         self.image_list.sort()
         self.transform = transform
         self.is_test = is_test
+        self.require_label = require_label
 
     def __len__(self):
         return len(self.image_list)
 
     def __getitem__(self, idx):
         image = Image.open(os.path.join(self.image_dir, 'input', self.image_list[idx]))
-        label = Image.open(os.path.join(self.image_dir, 'target', self.image_list[idx]))
+        if self.require_label:
+            label = Image.open(os.path.join(self.image_dir, 'target', self.image_list[idx]))
+        else:
+            label = None
 
         if self.transform:
             image, label = self.transform(image, label)
         else:
             image = F.to_tensor(image)
-            label = F.to_tensor(label)
+            if label is not None:
+                label = F.to_tensor(label)
         if self.is_test:
             name = self.image_list[idx]
+            if not self.require_label:
+                return image, name
             return image, label, name
         return image, label
 
@@ -49,10 +56,10 @@ class DeblurDataset(Dataset):
                 raise ValueError
 
 
-def test_dataloader(path, batch_size=1, num_workers=0):
-    image_dir = os.path.join(path, 'test')
+def test_dataloader(path, batch_size=1, num_workers=0, require_label= True):
+    image_dir = path
     dataloader = DataLoader(
-        DeblurDataset(image_dir, is_test=True),
+        DeblurDataset(image_dir, is_test=True, require_label = require_label),
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
@@ -74,13 +81,13 @@ def main(args):
     model = Adaptive_FFTFormer(pretrained=args.test_model)
     if torch.cuda.is_available():
         model.cuda()
-        
+
     _eval(model, args)
 
 def _eval(model, args):
 
     device = torch.device('cuda')
-    dataloader = test_dataloader(args.data_dir, batch_size=1, num_workers=8)
+    dataloader = test_dataloader(args.data_dir, batch_size=1, num_workers=8, require_label = not args.pred)
     torch.cuda.empty_cache()
 
     psnr_scores = []
@@ -90,7 +97,11 @@ def _eval(model, args):
 
         # Main Evaluation
         for iter_idx, data in tqdm(enumerate(dataloader)):
-            input_img, label_img, name = data
+
+            if args.pred:
+                input_img, name = data
+            else:
+                input_img, label_img, name = data
 
             input_img = input_img.to(device)
 
@@ -105,16 +116,18 @@ def _eval(model, args):
 
             pred_clip = torch.clamp(pred, 0, 1)
 
-            # Calculate PSNR
-            label_img = label_img.to(device)
-            crop_border = 4
-            psnr = calculate_psnr(label_img, pred_clip,crop_border=crop_border)
-            psnr_scores.append(psnr)
-            # Calculate SSIM
-            ssim = calculate_ssim(label_img, pred_clip,crop_border=crop_border)
-            ssim_scores.append(ssim)
+            if not args.pred:
+                # Calculate PSNR
+                label_img = label_img.to(device)
+                crop_border = 4
+                psnr = calculate_psnr(label_img, pred_clip,crop_border=crop_border)
+                # Calculate SSIM
+                ssim = calculate_ssim(label_img, pred_clip,crop_border=crop_border)
 
-            print(f'iter {iter_idx} : psnr={psnr}, ssim={ssim}')
+                psnr_scores.append(psnr)
+                ssim_scores.append(ssim)
+
+                print(f'index {iter_idx} : psnr={psnr}, ssim={ssim}')
 
             if args.save_image:
                 save_name = os.path.join(args.result_dir, name[0])
@@ -122,28 +135,27 @@ def _eval(model, args):
                 pred = F.to_pil_image(pred_clip.squeeze(0).cpu(), 'RGB')
                 pred.save(save_name)
 
-            # flops, params = profile(model, inputs=(input_img,), verbose=False)
-            # print(f"FLOPs: {flops / 1e9:.2f} G")
-            # print(f"Parameter Size: {params / 1e6:.2f} M")
+    if not args.pred:
+        avg_psnr = np.mean(psnr_scores)
+        avg_ssim = np.mean(ssim_scores)
 
-    avg_psnr = np.mean(psnr_scores)
-    avg_ssim = np.mean(ssim_scores)
-
-    print(f"Average PSNR: {avg_psnr:.2f}")
-    print(f"Average SSIM: {avg_ssim:.4f}")
+        print(f"Average PSNR: {avg_psnr:.2f}")
+        print(f"Average SSIM: {avg_ssim:.4f}")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
     # Directories
-    parser.add_argument('--model_name', default='fftformer', type=str)
-    parser.add_argument('--data_dir', type=str, default='./media/val/')
+    parser.add_argument('--model_name', default='Adaptive_fftformer', type=str)
+    parser.add_argument('--data_dir', type=str, default='./media/pred/')
 
     # Test
     parser.add_argument('--test_model', type=str, default='./pretrain_model/net_g_Realblur_J.pth')
-    parser.add_argument('--save_image', type=bool, default=False, choices=[True, False])
+    parser.add_argument('--pred', type=bool, default=True, choices=[True, False])
+    parser.add_argument('--save_image', type=bool, default=True, choices=[True, False])
 
     args = parser.parse_args()
-    args.result_dir = os.path.join('results/', args.model_name, 'GoPro/')
+    args.result_dir = os.path.join('results/', args.model_name, 'output')
     print(args)
     main(args)
+
