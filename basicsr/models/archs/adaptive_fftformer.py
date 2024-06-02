@@ -77,18 +77,20 @@ class Adaptive_FFTFormer(fftformer):
         self.norm2 = nn.SyncBatchNorm(dim*2)
         self.norm3 = nn.SyncBatchNorm(dim*4)
         self.adapter_patch_embed = OverlapPatchEmbed(self.inp_channels, dim)
+        
+        self.blocks = nn.Sequential(*
+            [self.encoder_level1,
+            self.down1_2, self.encoder_level2,
+            self.down2_3, self.encoder_level3]
+        )
 
         self.up.apply(self._init_weights)
         self.spm.apply(self._init_weights)
         self.interactions.apply(self._init_weights)
         self.apply(self._init_deform_weights)
 
-        # # inherit all the layers from the pretrained model
-        # named_layers = dict(self.named_children())
-        # for name, layer in named_layers.items():
-        #     setattr(self, name, layer)
-
-        self.load_pretrained_weights(pretrained)
+        if pretrained is not None:
+            self.load_pretrained_weights(pretrained)
 
     def _add_level_embed(self, c2, c3, c4):
         c2 = c2 + self.level_embed[0]
@@ -118,7 +120,7 @@ class Adaptive_FFTFormer(fftformer):
 
     def load_pretrained_weights(self, weights):
         pretrained_state_dict = torch.load(weights)
-        model_state_dict = self.state_dict()
+        model_state_dict = self.state_dict()  
         for name, param in pretrained_state_dict.items():
             model_state_dict[name].copy_(param)
             model_state_dict[name].requires_grad = False

@@ -72,10 +72,9 @@ def main(args):
         os.makedirs(args.result_dir)
 
     model = Adaptive_FFTFormer(pretrained=args.test_model)
-    print(model)
     if torch.cuda.is_available():
         model.cuda()
-
+        
     _eval(model, args)
 
 def _eval(model, args):

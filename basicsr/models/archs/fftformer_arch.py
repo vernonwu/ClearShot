@@ -244,12 +244,6 @@ class fftformer(nn.Module):
             TransformerBlock(dim=int(dim * 2 ** 2), ffn_expansion_factor=ffn_expansion_factor,
                              bias=bias) for i in range(num_blocks[2])])
 
-        self.blocks = nn.Sequential(*
-            [self.encoder_level1,
-            self.down1_2, self.encoder_level2,
-            self.down2_3, self.encoder_level3]
-        )
-
         self.decoder_level3 = nn.Sequential(*[
             TransformerBlock(dim=int(dim * 2 ** 2), ffn_expansion_factor=ffn_expansion_factor,
                              bias=bias, att=True) for i in range(num_blocks[2])])
