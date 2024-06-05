@@ -12,6 +12,7 @@ import numpy as np
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 import time
+from basicsr.models.losses.losses import *
 
 
 class DeblurDataset(Dataset):
@@ -73,51 +74,62 @@ def test_dataloader(path, batch_size=1, num_workers=0, require_label=True):
 
 def _eval(model, data_dir, result_dir, pred=True, save_image=True):
     device = torch.device('cuda')
-    dataloader = test_dataloader(data_dir, batch_size=1, num_workers=8, require_label=not pred)
+    dataloader = test_dataloader(data_dir, batch_size=16, num_workers=8, require_label=not pred)
     torch.cuda.empty_cache()
 
     psnr_scores = []
     ssim_scores = []
 
-    with torch.no_grad():
-        for iter_idx, data in tqdm(enumerate(dataloader)):
-            if pred:
-                input_img, name = data
-            else:
-                input_img, label_img, name = data
+    loss1 = L1Loss()
+    loss2 = FFTLoss()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.00001)
 
-            input_img = input_img.to(device)
+    # with torch.no_grad():
+    for iter_idx, data in tqdm(enumerate(dataloader)):
+        # if pred:
+        #     input_img, name = data
+        # else:
+        input_img, label_img, name = data
 
-            b, c, h, w = input_img.shape
-            h_n = (32 - h % 32) % 32
-            w_n = (32 - w % 32) % 32
-            input_img = torch.nn.functional.pad(input_img, (0, w_n, 0, h_n), mode='reflect')
+        input_img = input_img.to(device)
 
-            pred_img = model(input_img)
-            torch.cuda.synchronize()
-            pred_img = pred_img[:, :, :h, :w]
+        b, c, h, w = input_img.shape
+        h_n = (32 - h % 32) % 32
+        w_n = (32 - w % 32) % 32
+        input_img = torch.nn.functional.pad(input_img, (0, w_n, 0, h_n), mode='reflect')
 
-            pred_clip = torch.clamp(pred_img, 0, 1)
+        pred_img = model(input_img)
+        torch.cuda.synchronize()
+        pred_img = pred_img[:, :, :h, :w]
 
-            if not pred:
-                label_img = label_img.to(device)
-                crop_border = 4
-                psnr = calculate_psnr(label_img, pred_clip, crop_border=crop_border)
-                ssim = calculate_ssim(label_img, pred_clip, crop_border=crop_border)
+        pred_clip = torch.clamp(pred_img, 0, 1)
+        label_img = label_img.to(device)
 
-                psnr_scores.append(psnr)
-                ssim_scores.append(ssim)
+        loss = loss1(pred_clip, label_img) + loss2(pred_clip, label_img)
 
-                print(f'index {iter_idx} : psnr={psnr}, ssim={ssim}')
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
 
-            if save_image:
-                dataset = name[0].split('/')[0]
-                if not os.path.exists(os.path.join(result_dir, dataset)):
-                    os.makedirs(os.path.join(result_dir, dataset))
-                save_name = os.path.join(result_dir, name[0])
-                pred_clip += 0.5 / 255
-                pred_img = F.to_pil_image(pred_clip.squeeze(0).cpu(), 'RGB')
-                pred_img.save(save_name)
+
+        if not pred:
+            crop_border = 4
+            psnr = calculate_psnr(label_img, pred_clip, crop_border=crop_border)
+            ssim = calculate_ssim(label_img, pred_clip, crop_border=crop_border)
+
+            psnr_scores.append(psnr)
+            ssim_scores.append(ssim)
+
+            print(f'index {iter_idx} : psnr={psnr}, ssim={ssim}')
+
+        if save_image:
+            dataset = name[0].split('/')[0]
+            if not os.path.exists(os.path.join(result_dir, dataset)):
+                os.makedirs(os.path.join(result_dir, dataset))
+            save_name = os.path.join(result_dir, name[0])
+            pred_clip += 0.5 / 255
+            pred_img = F.to_pil_image(pred_clip.squeeze(0).cpu(), 'RGB')
+            pred_img.save(save_name)
 
     if not pred:
         avg_psnr = np.mean(psnr_scores)
