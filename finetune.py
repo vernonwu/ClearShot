@@ -7,6 +7,7 @@ from torchvision.transforms import functional as F
 from torch.utils.data import Dataset, DataLoader
 from thop import profile
 from PIL import Image as Image
+import torchvision.transforms as transforms
 from tqdm import tqdm
 import numpy as np
 from watchdog.observers import Observer
@@ -42,9 +43,9 @@ class DeblurDataset(Dataset):
         if self.transform:
             image, label = self.transform(image, label)
         else:
-            image = F.to_tensor(image)
+            image = transforms.functional.to_tensor(image)
             if label is not None:
-                label = F.to_tensor(label)
+                label = transforms.functional.to_tensor(label)
         if self.is_test:
             name = self.image_list[idx]
             if not self.require_label:
@@ -74,8 +75,9 @@ def test_dataloader(path, batch_size=1, num_workers=0, require_label=True):
 
 def _eval(model, data_dir, result_dir, pred=True, save_image=True):
     device = torch.device('cuda')
-    dataloader = test_dataloader(data_dir, batch_size=16, num_workers=8, require_label=not pred)
+    dataloader = test_dataloader(data_dir, batch_size=1, num_workers=8, require_label=pred)
     torch.cuda.empty_cache()
+    print("Completed data loading!")
 
     psnr_scores = []
     ssim_scores = []
@@ -89,6 +91,7 @@ def _eval(model, data_dir, result_dir, pred=True, save_image=True):
         # if pred:
         #     input_img, name = data
         # else:
+        print(data)
         input_img, label_img, name = data
 
         input_img = input_img.to(device)
@@ -106,6 +109,7 @@ def _eval(model, data_dir, result_dir, pred=True, save_image=True):
         label_img = label_img.to(device)
 
         loss = loss1(pred_clip, label_img) + loss2(pred_clip, label_img)
+        print("loss:", loss.item())
 
         optimizer.zero_grad()
         loss.backward()
@@ -145,11 +149,11 @@ class NewImageHandler(FileSystemEventHandler):
         self.args = args
 
     def on_created(self, event):
-        if event.is_directory:
-            return
-        if event.src_path.endswith(('.png', '.jpg', '.jpeg')):
-            print(f'New image detected: {event.src_path}')
-            _eval(self.model, self.args.data_dir, self.args.result_dir, self.args.pred, self.args.save_image)
+        # if event.is_directory:
+        #     return
+        # if event.src_path.endswith(('.png', '.jpg', '.jpeg')):
+        print(f'New image detected: {event.src_path}')
+        _eval(self.model, self.args.data_dir, self.args.result_dir, self.args.pred, self.args.save_image)
 
 
 def main(args):
@@ -162,23 +166,24 @@ def main(args):
     if torch.cuda.is_available():
         model.cuda()
 
-    event_handler = NewImageHandler(model, args)
-    observer = Observer()
-    observer.schedule(event_handler, path=args.data_dir, recursive=True)
-    observer.start()
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        observer.stop()
-    observer.join()
+    # event_handler = NewImageHandler(model, args)
+    # observer = Observer()
+    # observer.schedule(event_handler, path=args.data_dir, recursive=True)
+    # observer.start()
+    _eval(model, data_dir=args.data_dir, result_dir=args.result_dir, pred=True)
+    # try:
+    #     while True:
+    #         time.sleep(1)
+    # except KeyboardInterrupt:
+    #     observer.stop()
+    # observer.join()
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
     parser.add_argument('--model_name', default='Adaptive_fftformer', type=str)
-    parser.add_argument('--data_dir', type=str, default='./media/pred/')
+    parser.add_argument('--data_dir', type=str, default='./media/val/')
 
     parser.add_argument('--test_model', type=str, default='./pretrain_model/net_g_Realblur_J.pth')
     parser.add_argument('--pred', type=bool, default=True, choices=[True, False])
