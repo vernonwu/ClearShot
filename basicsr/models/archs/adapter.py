@@ -252,6 +252,7 @@ class InteractionBlock(nn.Module):
                           feat=c, spatial_shapes=deform_inputs1[1],
                           level_start_index=deform_inputs1[2])
         x = unflatten(x,H,W)
+        # with torch.no_grad():
         for idx, blk in enumerate(blocks):
             x = blk(x)
 

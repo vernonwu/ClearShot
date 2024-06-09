@@ -22,7 +22,7 @@ class OverlapPatchEmbed(nn.Module):
         x = self.proj(x)
         return x
 
-class Adaptive_FFTFormer(fftformer):
+class Adaptive_FFTFormer(nn.Module):
     def __init__(self,
                  inp_channels=3,
                  out_channels=3,
@@ -61,6 +61,7 @@ class Adaptive_FFTFormer(fftformer):
 
         self.spm = SpatialPriorModule(inplanes=conv_inplane, embed_dim=dim)
         self.level_embed = nn.Parameter(torch.zeros(3, dim))
+        self.pretrained_model = fftformer(inp_channels=inp_channels, out_channels=out_channels, dim=dim, num_blocks=num_blocks, num_refinement_blocks=num_refinement_blocks, ffn_expansion_factor=ffn_expansion_factor, bias=bias)
 
         self.interactions = nn.Sequential(*[
             InteractionBlock(dim=dim*(2**i), num_heads=deform_num_heads, n_points=n_points,
@@ -76,12 +77,12 @@ class Adaptive_FFTFormer(fftformer):
         self.norm1 = nn.SyncBatchNorm(dim)
         self.norm2 = nn.SyncBatchNorm(dim*2)
         self.norm3 = nn.SyncBatchNorm(dim*4)
-        self.adapter_patch_embed = OverlapPatchEmbed(self.inp_channels, dim)
+        self.adapter_patch_embed = OverlapPatchEmbed(self.pretrained_model.inp_channels, dim)
         
         self.blocks = nn.Sequential(*
-            [self.encoder_level1,
-            self.down1_2, self.encoder_level2,
-            self.down2_3, self.encoder_level3]
+            [self.pretrained_model.encoder_level1,
+            self.pretrained_model.down1_2, self.pretrained_model.encoder_level2,
+            self.pretrained_model.down2_3, self.pretrained_model.encoder_level3]
         )
 
         self.up.apply(self._init_weights)
@@ -91,6 +92,8 @@ class Adaptive_FFTFormer(fftformer):
 
         if pretrained is not None:
             self.load_pretrained_weights(pretrained)
+        for param in self.pretrained_model.parameters():
+            param.requires_grad = False
 
     def _add_level_embed(self, c2, c3, c4):
         c2 = c2 + self.level_embed[0]
@@ -120,11 +123,11 @@ class Adaptive_FFTFormer(fftformer):
 
     def load_pretrained_weights(self, weights):
         pretrained_state_dict = torch.load(weights)
-        model_state_dict = self.state_dict()  
+        model_state_dict = self.pretrained_model.state_dict()  
         for name, param in pretrained_state_dict.items():
             model_state_dict[name].copy_(param)
-            model_state_dict[name].requires_grad = False
-        self.load_state_dict(model_state_dict)
+            # model_state_dict[name].requires_grad = False
+        self.pretrained_model.load_state_dict(model_state_dict)
 
     def _init_deform_weights(self, m):
         if isinstance(m, MSDeformAttn):
@@ -137,6 +140,7 @@ class Adaptive_FFTFormer(fftformer):
         c = torch.cat([c1, c2, c3], dim=1)
         
         x = input_img
+        # with torch.no_grad():
         x = self.adapter_patch_embed(x)
 
         encoder_list = []
@@ -152,22 +156,24 @@ class Adaptive_FFTFormer(fftformer):
         f2 = self.norm2(encoder_list[1])
         f3 = self.norm3(encoder_list[2])
 
-        out_dec_level3 = self.decoder_level3(f3)
+        # with torch.no_grad():
 
-        inp_dec_level2 = self.up3_2(out_dec_level3)
+        out_dec_level3 = self.pretrained_model.decoder_level3(f3)
 
-        inp_dec_level2 = self.fuse2(inp_dec_level2, f2)
+        inp_dec_level2 = self.pretrained_model.up3_2(out_dec_level3)
 
-        out_dec_level2 = self.decoder_level2(inp_dec_level2)
+        inp_dec_level2 = self.pretrained_model.fuse2(inp_dec_level2, f2)
 
-        inp_dec_level1 = self.up2_1(out_dec_level2)
+        out_dec_level2 = self.pretrained_model.decoder_level2(inp_dec_level2)
 
-        inp_dec_level1 = self.fuse1(inp_dec_level1, f1)
-        out_dec_level1 = self.decoder_level1(inp_dec_level1)
+        inp_dec_level1 = self.pretrained_model.up2_1(out_dec_level2)
 
-        out_dec_level1 = self.refinement(out_dec_level1)
+        inp_dec_level1 = self.pretrained_model.fuse1(inp_dec_level1, f1)
+        out_dec_level1 = self.pretrained_model.decoder_level1(inp_dec_level1)
 
-        out_dec_level1 = self.output(out_dec_level1) + input_img
+        out_dec_level1 = self.pretrained_model.refinement(out_dec_level1)
+
+        out_dec_level1 = self.pretrained_model.output(out_dec_level1) + input_img
 
         return out_dec_level1
 
