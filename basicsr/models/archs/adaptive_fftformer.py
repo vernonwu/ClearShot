@@ -34,11 +34,12 @@ class Adaptive_FFTFormer(fftformer):
                  pretrain_size=224,
                  num_heads=12,
                  conv_inplane=48,
+                 patch_size = 8,
                  n_points=4,
                  deform_num_heads=6,
                  init_values=0.,
                  interaction_indexes=[[0, 0], [1, 2],[3, 4]],
-                 with_cffn= False,
+                 with_cffn= True,
                  cffn_ratio=0.25,
                  deform_ratio=1.0,
                  add_vit_feature=True,
@@ -56,14 +57,15 @@ class Adaptive_FFTFormer(fftformer):
         #          num_refinement_blocks,
         #          ffn_expansion_factor,
         #          bias=False)
+        self.patch_size = patch_size
         self.drop_path_rate = 0.2
         self.interaction_indexes = interaction_indexes
 
-        self.spm = SpatialPriorModule(inplanes=conv_inplane, embed_dim=dim)
-        self.level_embed = nn.Parameter(torch.zeros(3, dim))
+        self.spm = SpatialPriorModule(inplanes=conv_inplane, embed_dim=dim*patch_size**2)
+        self.level_embed = nn.Parameter(torch.zeros(3, dim*patch_size**2))
 
         self.interactions = nn.Sequential(*[
-            InteractionBlock(dim=dim*(2**i), num_heads=deform_num_heads, n_points=n_points,
+            InteractionBlock(dim=dim*2**i*patch_size**2, num_heads=deform_num_heads, n_points=n_points,
                              init_values=init_values, drop_path=self.drop_path_rate,
                              with_cffn=with_cffn, norm_layer=partial(nn.LayerNorm, eps=1e-6),
                              cffn_ratio=cffn_ratio, deform_ratio=deform_ratio, extra_extractor= False,
@@ -77,7 +79,7 @@ class Adaptive_FFTFormer(fftformer):
         self.norm2 = nn.SyncBatchNorm(dim*2)
         self.norm3 = nn.SyncBatchNorm(dim*4)
         self.adapter_patch_embed = OverlapPatchEmbed(self.inp_channels, dim)
-        
+
         self.blocks = nn.Sequential(*
             [self.encoder_level1,
             self.down1_2, self.encoder_level2,
@@ -120,7 +122,7 @@ class Adaptive_FFTFormer(fftformer):
 
     def load_pretrained_weights(self, weights):
         pretrained_state_dict = torch.load(weights)
-        model_state_dict = self.state_dict()  
+        model_state_dict = self.state_dict()
         for name, param in pretrained_state_dict.items():
             model_state_dict[name].copy_(param)
             model_state_dict[name].requires_grad = False
@@ -135,13 +137,13 @@ class Adaptive_FFTFormer(fftformer):
         c1, c2, c3 = self.spm(input_img)
         c1, c2, c3 = self._add_level_embed(c1, c2, c3)
         c = torch.cat([c1, c2, c3], dim=1)
-        
+
         x = input_img
         x = self.adapter_patch_embed(x)
 
         encoder_list = []
         for i, layer in enumerate(self.interactions):
-            deform_inputs1, deform_inputs2 = deform_inputs(x)
+            deform_inputs1, deform_inputs2 = deform_inputs(x, self.patch_size)
             indexes = self.interaction_indexes[i]
             bs, dim, H, W = x.shape
             x, c = layer(x, c, self.blocks[indexes[0]:indexes[-1] + 1],
@@ -170,5 +172,3 @@ class Adaptive_FFTFormer(fftformer):
         out_dec_level1 = self.output(out_dec_level1) + input_img
 
         return out_dec_level1
-
-
