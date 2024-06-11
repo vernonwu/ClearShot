@@ -24,6 +24,13 @@ def unflatten(x,h,w):
     # return x
     return rearrange(x, 'b (h w) c -> b c h w', h=h, w=w)
 
+def project_in(x, patch_size):
+    return rearrange(x, 'b c (h patch1) (w patch2) -> b (h w) (c patch1 patch2)', patch1=patch_size,
+                         patch2=patch_size)
+
+def project_out(x,H,W,patch_size):
+    return rearrange(x, 'b (h w) (c patch1 patch2) -> b c (h patch1) (w patch2)', patch1= patch_size, patch2 = patch_size,
+                      h = H // patch_size, w = W // patch_size)
 class PatchMerging(nn.Module):
     """Patch merging inspired by swin Transformer.
     """
@@ -31,25 +38,25 @@ class PatchMerging(nn.Module):
         super(PatchMerging, self).__init__()
         self.layer_norm = nn.LayerNorm(embed_dim * 4)
         self.conv = nn.Conv1d(embed_dim * 4, embed_dim * 2, kernel_size=1)
-        
+
     def forward(self, x):
         B, N, C = x.shape
-        
+
         # Pad if necessary to make N a multiple of 4
         if N % 4 != 0:
             padding_size = 4 - (N % 4)
             x = nn.functional.pad(x, (0, 0, 0, padding_size))
             N += padding_size
-        
+
         # Reshape to [B, N/4, 4C]
         x = x.contiguous().view(B, N // 4, 4 * C)
-        
+
         # Apply layer normalization
         x = self.layer_norm(x)
-        
+
         # Reshape for convolution [B, 4C, N/4]
         x = x.permute(0, 2, 1)
-        
+
         # Apply convolution
         x = self.conv(x)
 
@@ -58,23 +65,6 @@ class PatchMerging(nn.Module):
 
         return x
 
-def interpolate_tensor(input_tensor, output_dim):
-    # Ensure the input tensor is of shape [B, input_dim, C]
-    assert input_tensor.dim() == 3, "Input tensor must be 3-dimensional"
-    
-    B, input_dim, C = input_tensor.shape
-    
-    # Permute the tensor to shape [B, C, input_dim] for interpolation
-    input_tensor = input_tensor.permute(0, 2, 1)
-    
-    # Perform interpolation along the dimension to be changed
-    interpolated_tensor = F.interpolate(input_tensor, size=output_dim, mode='linear', align_corners=True)
-    
-    # Permute back to the original shape [B, output_dim, C]
-    interpolated_tensor = interpolated_tensor.permute(0, 2, 1)
-    
-    return interpolated_tensor
-    
 def get_reference_points(spatial_shapes, device):
     reference_points_list = []
     for lvl, (H_, W_) in enumerate(spatial_shapes):
@@ -90,7 +80,7 @@ def get_reference_points(spatial_shapes, device):
     return reference_points
 
 
-def deform_inputs(x):
+def deform_inputs(x, patch_size):
     bs, c, h, w = x.shape
     spatial_shapes = torch.as_tensor([(h // 8, w // 8),
                                       (h // 16, w // 16),
@@ -98,10 +88,10 @@ def deform_inputs(x):
                                      dtype=torch.long, device=x.device)
     level_start_index = torch.cat((spatial_shapes.new_zeros(
         (1,)), spatial_shapes.prod(1).cumsum(0)[:-1]))
-    reference_points = get_reference_points([(h, w)], x.device)
+    reference_points = get_reference_points([(h // patch_size, w // patch_size)], x.device)
     deform_inputs1 = [reference_points, spatial_shapes, level_start_index]
 
-    spatial_shapes = torch.as_tensor([(h, w)], dtype=torch.long, device=x.device)
+    spatial_shapes = torch.as_tensor([(h // patch_size, w // patch_size)], dtype=torch.long, device=x.device)
     level_start_index = torch.cat((spatial_shapes.new_zeros(
         (1,)), spatial_shapes.prod(1).cumsum(0)[:-1]))
     reference_points = get_reference_points([(h // 8, w // 8),
@@ -149,7 +139,7 @@ class DWConv(nn.Module):
         x2 = self.dwconv(x2).flatten(2).transpose(1, 2)
         x3 = self.dwconv(x3).flatten(2).transpose(1, 2)
         x = torch.cat([x1, x2, x3], dim=1)
-        return x 
+        return x
 
 
 class Extractor(nn.Module):
@@ -220,8 +210,10 @@ class Injector(nn.Module):
 class InteractionBlock(nn.Module):
     def __init__(self, dim, num_heads=6, n_points=4, norm_layer=partial(nn.LayerNorm, eps=1e-6),
                  drop=0., drop_path=0., with_cffn=False, cffn_ratio=0.25, init_values=0.,
-                 deform_ratio=1.0, extra_extractor=False, with_cp=False, patch_merge = False):
+                 deform_ratio=1.0, extra_extractor=False, with_cp=False, patch_merge = False, bias = False):
         super().__init__()
+
+        self.patch_size = 8
 
         self.injector = Injector(dim=dim - dim*patch_merge//2, n_levels=3, num_heads=num_heads, init_values=init_values,
                                  n_points=n_points, norm_layer=norm_layer, deform_ratio=deform_ratio,
@@ -245,27 +237,26 @@ class InteractionBlock(nn.Module):
             self.patch_merger = None
 
     def forward(self, x, c, blocks, deform_inputs1, deform_inputs2, H, W):
-        # flatten x
-        x = flatten(x)
+
+        x = project_in(x, self.patch_size)
 
         x = self.injector(query=x, reference_points=deform_inputs1[0],
                           feat=c, spatial_shapes=deform_inputs1[1],
                           level_start_index=deform_inputs1[2])
-        x = unflatten(x,H,W)
-        # with torch.no_grad():
+
+        x = project_out(x,H,W,self.patch_size)
+
         for idx, blk in enumerate(blocks):
             x = blk(x)
 
-        deform_inputs1, deform_inputs2 = deform_inputs(x)
-        adjusted_dim = deform_inputs2[0].shape[1]
+        deform_inputs1, deform_inputs2 = deform_inputs(x, self.patch_size)
 
         if self.patch_merger is not None:
             H = H // 2
             W = W // 2
             c = self.patch_merger(c)
-            c = interpolate_tensor(c, adjusted_dim)
-        
-        x = flatten(x)
+
+        x = project_in(x, self.patch_size)
 
         c = self.extractor(query=c, reference_points=deform_inputs2[0],
                            feat=x, spatial_shapes=deform_inputs2[1],
@@ -275,8 +266,9 @@ class InteractionBlock(nn.Module):
                 c = extractor(query=c, reference_points=deform_inputs2[0],
                               feat=x, spatial_shapes=deform_inputs2[1],
                               level_start_index=deform_inputs2[2], H=H, W=W)
-                
-        x = unflatten(x,H,W)
+
+        x = project_out(x,H,W,self.patch_size)
+
         return x, c
 
 

@@ -110,6 +110,8 @@ else:
     os.makedirs('REDS', exist_ok=True)
     root_dir = 'REDS'
 
+# print("test")
+
 for subset in ids:
     argdict = args.__dict__
     if args.all or argdict[subset]:

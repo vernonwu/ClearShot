@@ -84,31 +84,23 @@ def _eval(model, data_dir, result_dir, pred=True, save_image=True):
 
     loss1 = L1Loss()
     loss2 = FFTLoss()
-    total_num = sum(p.numel() for p in model.parameters())
-    trainable_num = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print('Total', total_num, 'Trainable', trainable_num)
-
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.00001)
-    # for param in model.parameters():
-    #     param.requires_grad = False
 
     # with torch.no_grad():
     for iter_idx, data in tqdm(enumerate(dataloader)):
         # if pred:
         #     input_img, name = data
         # else:
-        # print(data)
+        print(data)
         input_img, label_img, name = data
 
         input_img = input_img.to(device)
 
         b, c, h, w = input_img.shape
-        print(input_img.shape)
         h_n = (32 - h % 32) % 32
         w_n = (32 - w % 32) % 32
         input_img = torch.nn.functional.pad(input_img, (0, w_n, 0, h_n), mode='reflect')
-        print(input_img.shape)
-        # with torch.no_grad():
+
         pred_img = model(input_img)
         torch.cuda.synchronize()
         pred_img = pred_img[:, :, :h, :w]
@@ -140,7 +132,7 @@ def _eval(model, data_dir, result_dir, pred=True, save_image=True):
                 os.makedirs(os.path.join(result_dir, dataset))
             save_name = os.path.join(result_dir, name[0])
             pred_clip += 0.5 / 255
-            pred_img = transforms.functional.to_pil_image(pred_clip.squeeze(0).cpu(), 'RGB')
+            pred_img = F.to_pil_image(pred_clip.squeeze(0).cpu(), 'RGB')
             pred_img.save(save_name)
 
     if not pred:

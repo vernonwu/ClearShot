@@ -1,149 +1,327 @@
-import os
+import logging
+from functools import partial
+
 import torch
-import argparse
-from basicsr.models.archs.fftformer_arch import  fftformer
-from basicsr.metrics.psnr_ssim import calculate_psnr, calculate_ssim
-from torchvision.transforms import functional as F
-from torch.utils.data import Dataset, DataLoader
-from thop import profile
-from PIL import Image as Image
-from tqdm import tqdm
-import numpy as np
-from skimage.metrics import peak_signal_noise_ratio, structural_similarity
+import torch.nn as nn
+import torch.nn.functional as F
+from basicsr.models.archs.ms_deform_attn import MSDeformAttn
+from timm.models.layers import DropPath
+from einops import rearrange
+import torch.utils.checkpoint as cp
+
+_logger = logging.getLogger(__name__)
+
+def flatten(x):
+    # x_patch = rearrange(x, 'b c (h patch1) (w patch2) -> b (h w) (c patch1 patch2)', patch1=patch_size,
+    #     patch2=patch_size)
+    # return x_patch
+    return rearrange(x, 'b c h w -> b (h w) c')
 
 
-class DeblurDataset(Dataset):
-    def __init__(self, image_dir, transform=None, is_test=False):
-        self.image_dir = image_dir
-        self.datasets = os.listdir(os.path.join(image_dir, 'input'))
-        self.image_list = []
-        for dataset in self.datasets:
-            image_list = os.listdir(os.path.join(image_dir, 'input', dataset))
-            self.image_list += [os.path.join(dataset, x) for x in image_list]
-        self._check_image(self.image_list)
-        self.image_list.sort()
-        self.transform = transform
-        self.is_test = is_test
-    def __len__(self):
-        return len(self.image_list)
-    def __getitem__(self, idx):
-        image = Image.open(os.path.join(self.image_dir, 'input', self.image_list[idx]))
-        label = Image.open(os.path.join(self.image_dir, 'target', self.image_list[idx]))
-        if self.transform:
-            image, label = self.transform(image, label)
+def unflatten(x,h,w):
+    # x = rearrange(x_patch, 'b c (h patch1) (w patch2) -> b c h w patch1 patch2', patch1=patch_size,
+    #     patch2=patch_size)
+    # return x
+    return rearrange(x, 'b (h w) c -> b c h w', h=h, w=w)
+
+def project_in(x, patch_size):
+    return rearrange(x, 'b c (h patch1) (w patch2) -> b (h w) (c patch1 patch2)', patch1=patch_size,
+                         patch2=patch_size)
+
+def project_out(x,H,W,patch_size):
+    return rearrange(x, 'b (h w) (c patch1 patch2) -> b c (h patch1) (w patch2)', patch1= patch_size, patch2 = patch_size,
+                      h = H // patch_size, w = W // patch_size)
+class PatchMerging(nn.Module):
+    """Patch merging inspired by swin Transformer.
+    """
+    def __init__(self, embed_dim):
+        super(PatchMerging, self).__init__()
+        self.layer_norm = nn.LayerNorm(embed_dim * 4)
+        self.conv = nn.Conv1d(embed_dim * 4, embed_dim * 2, kernel_size=1)
+
+    def forward(self, x):
+        B, N, C = x.shape
+
+        # Pad if necessary to make N a multiple of 4
+        if N % 4 != 0:
+            padding_size = 4 - (N % 4)
+            x = nn.functional.pad(x, (0, 0, 0, padding_size))
+            N += padding_size
+
+        # Reshape to [B, N/4, 4C]
+        x = x.contiguous().view(B, N // 4, 4 * C)
+
+        # Apply layer normalization
+        x = self.layer_norm(x)
+
+        # Reshape for convolution [B, 4C, N/4]
+        x = x.permute(0, 2, 1)
+
+        # Apply convolution
+        x = self.conv(x)
+
+        # Reshape back to [B, N/4, 2C]
+        x = x.permute(0, 2, 1)
+
+        return x
+
+def get_reference_points(spatial_shapes, device):
+    reference_points_list = []
+    for lvl, (H_, W_) in enumerate(spatial_shapes):
+        ref_y, ref_x = torch.meshgrid(
+            torch.linspace(0.5, H_ - 0.5, H_, dtype=torch.float32, device=device),
+            torch.linspace(0.5, W_ - 0.5, W_, dtype=torch.float32, device=device))
+        ref_y = ref_y.reshape(-1)[None] / H_
+        ref_x = ref_x.reshape(-1)[None] / W_
+        ref = torch.stack((ref_x, ref_y), -1)
+        reference_points_list.append(ref)
+    reference_points = torch.cat(reference_points_list, 1)
+    reference_points = reference_points[:, :, None]
+    return reference_points
+
+
+def deform_inputs(x, patch_size):
+    bs, c, h, w = x.shape
+    spatial_shapes = torch.as_tensor([(h // 8, w // 8),
+                                      (h // 16, w // 16),
+                                      (h // 32, w // 32)],
+                                     dtype=torch.long, device=x.device)
+    level_start_index = torch.cat((spatial_shapes.new_zeros(
+        (1,)), spatial_shapes.prod(1).cumsum(0)[:-1]))
+    reference_points = get_reference_points([(h // patch_size, w // patch_size)], x.device)
+    deform_inputs1 = [reference_points, spatial_shapes, level_start_index]
+
+    spatial_shapes = torch.as_tensor([(h // patch_size, w // patch_size)], dtype=torch.long, device=x.device)
+    level_start_index = torch.cat((spatial_shapes.new_zeros(
+        (1,)), spatial_shapes.prod(1).cumsum(0)[:-1]))
+    reference_points = get_reference_points([(h // 8, w // 8),
+                                                   (h // 16, w // 16),
+                                                   (h // 32, w // 32)], x.device)
+    deform_inputs2 = [reference_points, spatial_shapes, level_start_index]
+
+    return deform_inputs1, deform_inputs2
+
+
+class ConvFFN(nn.Module):
+    def __init__(self, in_features, hidden_features=None, out_features=None,
+                 act_layer=nn.GELU, drop=0.):
+        super().__init__()
+        out_features = out_features or in_features
+        hidden_features = hidden_features or in_features
+        self.fc1 = nn.Linear(in_features, hidden_features)
+        self.dwconv = DWConv(hidden_features)
+        self.act = act_layer()
+        self.fc2 = nn.Linear(hidden_features, out_features)
+        self.drop = nn.Dropout(drop)
+
+    def forward(self, x, H, W):
+        x = self.fc1(x)
+        x = self.dwconv(x, H, W)
+        x = self.act(x)
+        x = self.drop(x)
+        x = self.fc2(x)
+        x = self.drop(x)
+        return x
+
+
+class DWConv(nn.Module):
+    def __init__(self, dim=768):
+        super().__init__()
+        self.dwconv = nn.Conv2d(dim, dim, 3, 1, 1, bias=True, groups=dim)
+
+    def forward(self, x, H, W):
+        B, N, C = x.shape
+        n = N // 21
+        x1 = x[:, 0:16 * n, :].transpose(1, 2).view(B, C, H // 8, W // 8).contiguous()
+        x2 = x[:, 16 * n:20 * n, :].transpose(1, 2).view(B, C, H // 16, W // 16).contiguous()
+        x3 = x[:, 20 * n:, :].transpose(1, 2).view(B, C, H // 32, W // 32).contiguous()
+        x1 = self.dwconv(x1).flatten(2).transpose(1, 2)
+        x2 = self.dwconv(x2).flatten(2).transpose(1, 2)
+        x3 = self.dwconv(x3).flatten(2).transpose(1, 2)
+        x = torch.cat([x1, x2, x3], dim=1)
+        return x
+
+
+class Extractor(nn.Module):
+    def __init__(self, dim, num_heads=6, n_points=4, n_levels=1, deform_ratio=1.0,
+                 with_cffn=True, cffn_ratio=0.25, drop=0., drop_path=0.,
+                 norm_layer=partial(nn.LayerNorm, eps=1e-6), with_cp=False):
+        super().__init__()
+        self.query_norm = norm_layer(dim)
+        self.feat_norm = norm_layer(dim)
+        self.attn = MSDeformAttn(d_model=dim, n_levels=n_levels, n_heads=num_heads,
+                                 n_points=n_points, ratio=deform_ratio)
+        self.with_cffn = with_cffn
+        self.with_cp = with_cp
+        if with_cffn:
+            self.ffn = ConvFFN(in_features=dim, hidden_features=int(dim * cffn_ratio), drop=drop)
+            self.ffn_norm = norm_layer(dim)
+            self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+
+    def forward(self, query, reference_points, feat, spatial_shapes, level_start_index, H, W):
+
+        def _inner_forward(query, feat):
+
+            attn = self.attn(self.query_norm(query), reference_points,
+                             self.feat_norm(feat), spatial_shapes,
+                             level_start_index, None)
+            query = query + attn
+
+            if self.with_cffn:
+                query = query + self.drop_path(self.ffn(self.ffn_norm(query), H, W))
+            return query
+
+        if self.with_cp and query.requires_grad:
+            query = cp.checkpoint(_inner_forward, query, feat)
         else:
-            image = F.to_tensor(image)
-            label = F.to_tensor(label)
-        if self.is_test:
-            name = self.image_list[idx]
-            return image, label, name
-        return image, label
-    @staticmethod
-    def _check_image(lst):
-        for x in lst:
-            splits = x.split('.')
-            if splits[-1] not in ['png', 'jpg', 'jpeg']:
-                raise ValueError
+            query = _inner_forward(query, feat)
+
+        return query
 
 
-def test_dataloader(path, batch_size=1, num_workers=0):
-    image_dir = os.path.join(path, 'test')
-    dataloader = DataLoader(
-        DeblurDataset(image_dir, is_test=True),
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=True
-    )
-    return dataloader
+class Injector(nn.Module):
+    def __init__(self, dim, num_heads=6, n_points=4, n_levels=1, deform_ratio=1.0,
+                 norm_layer=partial(nn.LayerNorm, eps=1e-6), init_values=0., with_cp=False):
+        super().__init__()
+        self.with_cp = with_cp
+        self.query_norm = norm_layer(dim)
+        self.feat_norm = norm_layer(dim)
+        self.attn = MSDeformAttn(d_model=dim, n_levels=n_levels, n_heads=num_heads,
+                                 n_points=n_points, ratio=deform_ratio)
+        self.gamma = nn.Parameter(init_values * torch.ones((dim)), requires_grad=True)
+
+    def forward(self, query, reference_points, feat, spatial_shapes, level_start_index):
+
+        def _inner_forward(query, feat):
+
+            attn = self.attn(self.query_norm(query), reference_points,
+                             self.feat_norm(feat), spatial_shapes,
+                             level_start_index, None)
+            return query + self.gamma * attn
+
+        if self.with_cp and query.requires_grad:
+            query = cp.checkpoint(_inner_forward, query, feat)
+        else:
+            query = _inner_forward(query, feat)
+
+        return query
 
 
-def main(args):
-    # CUDNN
-    # cudnn.benchmark = True
-    #
-    if not os.path.exists('results/' + args.model_name + '/'):
-        os.makedirs('results/' + args.model_name + '/')
-    if not os.path.exists(args.result_dir):
-        os.makedirs(args.result_dir)
-    model = fftformer()
-    # print(model)
-    if torch.cuda.is_available():
-        model.cuda()
-    _eval(model, args)
+class InteractionBlock(nn.Module):
+    def __init__(self, dim, num_heads=6, n_points=4, norm_layer=partial(nn.LayerNorm, eps=1e-6),
+                 drop=0., drop_path=0., with_cffn=False, cffn_ratio=0.25, init_values=0.,
+                 deform_ratio=1.0, extra_extractor=False, with_cp=False, patch_merge = False, bias = False):
+        super().__init__()
 
-def _eval(model, args):
+        self.patch_size = 8
 
-    state_dict = torch.load(args.test_model)
-    model.load_state_dict(state_dict, strict=True)
+        self.injector = Injector(dim=dim - dim*patch_merge//2, n_levels=3, num_heads=num_heads, init_values=init_values,
+                                 n_points=n_points, norm_layer=norm_layer, deform_ratio=deform_ratio,
+                                 with_cp=with_cp)
+        self.extractor = Extractor(dim=dim, n_levels=1, num_heads=num_heads, n_points=n_points,
+                                   norm_layer=norm_layer, deform_ratio=deform_ratio, with_cffn=with_cffn,
+                                   cffn_ratio=cffn_ratio, drop=drop, drop_path=drop_path, with_cp=with_cp)
+        if extra_extractor:
+            self.extra_extractors = nn.Sequential(*[
+                Extractor(dim=dim, num_heads=num_heads, n_points=n_points, norm_layer=norm_layer,
+                          with_cffn=with_cffn, cffn_ratio=cffn_ratio, deform_ratio=deform_ratio,
+                          drop=drop, drop_path=drop_path, with_cp=with_cp)
+                for _ in range(2)
+            ])
+        else:
+            self.extra_extractors = None
 
-    device = torch.device('cuda')
-    dataloader = test_dataloader(args.data_dir, batch_size=1, num_workers=8)
+        if patch_merge:
+            self.patch_merger = PatchMerging(embed_dim = dim//2)
+        else:
+            self.patch_merger = None
 
-    torch.cuda.empty_cache()
-    model.eval()
+    def forward(self, x, c, blocks, deform_inputs1, deform_inputs2, H, W):
 
-    psnr_scores = []
-    ssim_scores = []
+        x = project_in(x, self.patch_size)
 
-    with torch.no_grad():
+        x = self.injector(query=x, reference_points=deform_inputs1[0],
+                          feat=c, spatial_shapes=deform_inputs1[1],
+                          level_start_index=deform_inputs1[2])
 
-        # Main Evaluation
-        for iter_idx, data in tqdm(enumerate(dataloader)):
-            input_img, label_img, name = data
+        x = project_out(x,H,W,self.patch_size)
 
-            input_img = input_img.to(device)
+        for idx, blk in enumerate(blocks):
+            x = blk(x)
 
-            b, c, h, w = input_img.shape
-            h_n = (32 - h % 32) % 32
-            w_n = (32 - w % 32) % 32
-            input_img = torch.nn.functional.pad(input_img, (0, w_n, 0, h_n), mode='reflect')
+        deform_inputs1, deform_inputs2 = deform_inputs(x, self.patch_size)
 
-            pred = model(input_img)
-            torch.cuda.synchronize()
-            pred = pred[:, :, :h, :w]
+        if self.patch_merger is not None:
+            H = H // 2
+            W = W // 2
+            c = self.patch_merger(c)
 
-            pred_clip = torch.clamp(pred, 0, 1)
+        x = project_in(x, self.patch_size)
 
-            # Calculate PSNR
-            label_img = label_img.to(device)
-            crop_border = 4
-            psnr = calculate_psnr(label_img, pred_clip,crop_border=crop_border)
-            psnr_scores.append(psnr)
-            # Calculate SSIM
-            ssim = calculate_ssim(label_img, pred_clip,crop_border=crop_border)
-            ssim_scores.append(ssim)
+        c = self.extractor(query=c, reference_points=deform_inputs2[0],
+                           feat=x, spatial_shapes=deform_inputs2[1],
+                           level_start_index=deform_inputs2[2], H=H, W=W)
+        if self.extra_extractors is not None:
+            for extractor in self.extra_extractors:
+                c = extractor(query=c, reference_points=deform_inputs2[0],
+                              feat=x, spatial_shapes=deform_inputs2[1],
+                              level_start_index=deform_inputs2[2], H=H, W=W)
 
-            print(f'iter {iter_idx} : psnr={psnr}, ssim={ssim}')
+        x = project_out(x,H,W,self.patch_size)
 
-            if args.save_image:
-                save_name = os.path.join(args.result_dir, name[0])
-                pred_clip += 0.5 / 255
-                pred = F.to_pil_image(pred_clip.squeeze(0).cpu(), 'RGB')
-                pred.save(save_name)
+        return x, c
 
-            # flops, params = profile(model, inputs=(input_img,), verbose=False)
-            # print(f"FLOPs: {flops / 1e9:.2f} G")
-            # print(f"Parameter Size: {params / 1e6:.2f} M")
 
-    avg_psnr = np.mean(psnr_scores)
-    avg_ssim = np.mean(ssim_scores)
+class SpatialPriorModule(nn.Module):
+    def __init__(self, inplanes=64, embed_dim=48):
+        super().__init__()
 
-    print(f"Average PSNR: {avg_psnr:.2f}")
-    print(f"Average SSIM: {avg_ssim:.4f}")
+        self.stem = nn.Sequential(*[
+            nn.Conv2d(3, inplanes, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.SyncBatchNorm(inplanes),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(inplanes, inplanes, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.SyncBatchNorm(inplanes),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(inplanes, inplanes, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.SyncBatchNorm(inplanes),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        ])
+        self.conv2 = nn.Sequential(*[
+            nn.Conv2d(inplanes, 2 * inplanes, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.SyncBatchNorm(2 * inplanes),
+            nn.ReLU(inplace=True)
+        ])
+        self.conv3 = nn.Sequential(*[
+            nn.Conv2d(2 * inplanes, 4 * inplanes, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.SyncBatchNorm(4 * inplanes),
+            nn.ReLU(inplace=True)
+        ])
+        self.conv4 = nn.Sequential(*[
+            nn.Conv2d(4 * inplanes, 4 * inplanes, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.SyncBatchNorm(4 * inplanes),
+            nn.ReLU(inplace=True)
+        ])
+        self.fc1 = nn.Conv2d(inplanes, embed_dim, kernel_size=1, stride=1, padding=0, bias=True)
+        self.fc2 = nn.Conv2d(2 * inplanes, embed_dim, kernel_size=1, stride=1, padding=0, bias=True)
+        self.fc3 = nn.Conv2d(4 * inplanes, embed_dim, kernel_size=1, stride=1, padding=0, bias=True)
+        self.fc4 = nn.Conv2d(4 * inplanes, embed_dim, kernel_size=1, stride=1, padding=0, bias=True)
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
+    def forward(self, x):
+        c1 = self.stem(x)
+        c2 = self.conv2(c1)
+        c3 = self.conv3(c2)
+        c4 = self.conv4(c3)
+        c1 = self.fc1(c1)
+        c2 = self.fc2(c2)
+        c3 = self.fc3(c3)
+        c4 = self.fc4(c4)
 
-    # Directories
-    parser.add_argument('--model_name', default='fftformer', type=str)
-    parser.add_argument('--data_dir', type=str, default='./media/val/')
+        bs, dim, _, _ = c1.shape
+        # c1 = c1.view(bs, dim, -1).transpose(1, 2)  # 4s
+        c2 = c2.view(bs, dim, -1).transpose(1, 2)  # 8s
+        c3 = c3.view(bs, dim, -1).transpose(1, 2)  # 16s
+        c4 = c4.view(bs, dim, -1).transpose(1, 2)  # 32s
 
-    # Test
-    parser.add_argument('--test_model', type=str, default='./pretrain_model/net_g_Realblur_J.pth')
-    parser.add_argument('--save_image', type=bool, default=False, choices=[True, False])
-
-    args = parser.parse_args()
-    args.result_dir = os.path.join('results/', args.model_name, 'GoPro/')
-    print(args)
-    main(args)
+        return c2, c3, c4
