@@ -11,6 +11,7 @@ import torchvision.transforms as transforms
 from tqdm import tqdm
 import numpy as np
 from watchdog.observers import Observer
+import pdb
 from watchdog.events import FileSystemEventHandler
 import time
 from basicsr.models.losses.losses import *
@@ -75,12 +76,21 @@ def test_dataloader(path, batch_size=1, num_workers=0, require_label=True):
 
 def _eval(model, data_dir, result_dir, pred=True, save_image=True):
     device = torch.device('cuda')
+    # pdb.set_trace()
     dataloader = test_dataloader(data_dir, batch_size=1, num_workers=8, require_label=pred)
     torch.cuda.empty_cache()
     print("Completed data loading!")
 
     psnr_scores = []
     ssim_scores = []
+    total_params = 0
+    trainable_params = 0
+    for param in model.parameters():
+        total_params += param.numel()
+        if param.requires_grad:
+            trainable_params += param.numel()
+
+    print("trainable:", trainable_params, "total:", total_params)
 
     loss1 = L1Loss()
     loss2 = FFTLoss()
@@ -97,8 +107,8 @@ def _eval(model, data_dir, result_dir, pred=True, save_image=True):
         input_img = input_img.to(device)
 
         b, c, h, w = input_img.shape
-        h_n = (32 - h % 32) % 32
-        w_n = (32 - w % 32) % 32
+        h_n = (128 - h % 128) % 128
+        w_n = (128 - w % 128) % 128
         input_img = torch.nn.functional.pad(input_img, (0, w_n, 0, h_n), mode='reflect')
 
         pred_img = model(input_img)
@@ -162,9 +172,9 @@ def main(args):
     if not os.path.exists(args.result_dir):
         os.makedirs(args.result_dir)
 
-    model = Adaptive_FFTFormer(pretrained=args.test_model)
-    if torch.cuda.is_available():
-        model.cuda()
+    model = Adaptive_FFTFormer(pretrained=args.test_model).to(torch.device("cuda"))
+    # if torch.cuda.is_available():
+    #     model.cuda()
 
     # event_handler = NewImageHandler(model, args)
     # observer = Observer()
