@@ -1,0 +1,10 @@
+nohup: ignoring input
+Downloading train_sharp.zip from SNU CVLab
+Traceback (most recent call last):
+  File "/root/projects/FFTformer/scripts/download_REDS.py", line 121, in <module>
+    download_file_from_server(args.server, subset, filename)    # download the designated subset
+  File "/root/projects/FFTformer/scripts/download_REDS.py", line 66, in download_file_from_server
+    save_response_content(response, destination)
+  File "/root/projects/FFTformer/scripts/download_REDS.py", line 50, in save_response_content
+    f.write(chunk)
+OSError: [Errno 28] No space left on device

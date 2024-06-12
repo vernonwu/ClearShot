@@ -141,6 +141,8 @@ class TransformerBlock(nn.Module):
 
         self.att = att
         if self.att:
+
+            
             self.norm1 = LayerNorm(dim, LayerNorm_type)
             self.attn = FSAS(dim, bias)
 
