@@ -130,8 +130,9 @@ def _eval(model, data_dir, result_dir, pred=True, save_image=True):
         print(f"Average PSNR: {avg_psnr:.2f}")
         print(f"Average SSIM: {avg_ssim:.4f}")
 
-def _eval2(model, q, result_dir, pred=True, save_image=True):
-    device = torch.device('cuda')
+def _eval2(model, q, result_dir,device_num='0', pred=True, save_image=True):
+
+    device = torch.device('cuda:'+device_num)
     torch.cuda.empty_cache()
 
     psnr_scores = []
@@ -141,6 +142,7 @@ def _eval2(model, q, result_dir, pred=True, save_image=True):
     with torch.no_grad():
         while True:
             if not q.empty():
+                start_time = time.time()
                 if pred:
                     name = q.get()
                     while 1:
@@ -158,8 +160,8 @@ def _eval2(model, q, result_dir, pred=True, save_image=True):
                 input_img = input_img.to(device)
         
                 b, c, h, w = input_img.shape
-                h_n = (32 - h % 32) % 32
-                w_n = (32 - w % 32) % 32
+                h_n = (128 - h % 128) % 128
+                w_n = (128 - w % 128) % 128
                 input_img = torch.nn.functional.pad(input_img, (0, w_n, 0, h_n), mode='reflect')
         
                 pred_img = model(input_img)
@@ -183,6 +185,8 @@ def _eval2(model, q, result_dir, pred=True, save_image=True):
                     pred_clip += 0.5 / 255
                     pred_img = F.to_pil_image(pred_clip.squeeze(0).cpu(), 'RGB')
                     pred_img.save(save_name)
+                    end_time = time.time()
+                    print("Image:{} done, cost time{}".format(name,end_time-start_time))
         
             if not pred:
                 avg_psnr = np.mean(psnr_scores)
@@ -245,20 +249,25 @@ def main(args):
     if not os.path.exists(args.result_dir):
         os.makedirs(args.result_dir)
 
-    model = Adaptive_FFTFormer(pretrained=args.test_model)
+    model_gpu0 = Adaptive_FFTFormer(pretrained=args.test_model)
+    model_gpu1 = Adaptive_FFTFormer(pretrained=args.test_model)
     if torch.cuda.is_available():
-        model.cuda()
+        model_gpu0.cuda(0)
+        model_gpu1.cuda(1)
 
     q = queue.Queue()
     event_handler = put_queue_handler(q)
     observer = Observer()
     observer.schedule(event_handler, path=args.data_dir, recursive=True)
-    thread = threading.Thread(target=_eval2, args=(model,q,args.result_dir,))
-    thread.start()
+    thread_gpu0 = threading.Thread(target=_eval2, args=(model_gpu0,q,args.result_dir,'0',))
+    thread_gpu1 = threading.Thread(target=_eval2, args=(model_gpu1,q,args.result_dir,'1',))
+    thread_gpu0.start()
+    thread_gpu1.start()
     observer.start()
-    
+     
     observer.join()
-    thread.join()
+    thread_gpu0.join()
+    thread_gpu1.join()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
