@@ -50,13 +50,13 @@ class Adaptive_FFTFormer(fftformer):
                  **kwargs):
         super(Adaptive_FFTFormer, self).__init__()
 
-        # self.pretrained_model = fftformer(inp_channels,
-        #          out_channels,
-        #          dim,
-        #          num_blocks,
-        #          num_refinement_blocks,
-        #          ffn_expansion_factor,
-        #          bias=False)
+        self.pretrained_model = fftformer(inp_channels,
+                 out_channels,
+                 dim,
+                 num_blocks,
+                 num_refinement_blocks,
+                 ffn_expansion_factor,
+                 bias=False)
         self.patch_size = patch_size
         self.drop_path_rate = 0.2
         self.interaction_indexes = interaction_indexes
@@ -78,7 +78,7 @@ class Adaptive_FFTFormer(fftformer):
         self.norm1 = nn.SyncBatchNorm(dim)
         self.norm2 = nn.SyncBatchNorm(dim*2)
         self.norm3 = nn.SyncBatchNorm(dim*4)
-        self.adapter_patch_embed = OverlapPatchEmbed(self.inp_channels, dim)
+        self.adapter_patch_embed = OverlapPatchEmbed(self.pretrained_model.inp_channels, dim)
 
         self.blocks = nn.Sequential(*
             [self.encoder_level1,
@@ -122,7 +122,7 @@ class Adaptive_FFTFormer(fftformer):
 
     def load_pretrained_weights(self, weights):
         pretrained_state_dict = torch.load(weights)
-        model_state_dict = self.state_dict()
+        model_state_dict = self.pretrained_model.state_dict()
         for name, param in pretrained_state_dict.items():
             model_state_dict[name].copy_(param)
             model_state_dict[name].requires_grad = False
