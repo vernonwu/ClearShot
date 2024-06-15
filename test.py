@@ -95,8 +95,8 @@ def _eval(model, args):
             input_img = input_img.to(device)
 
             b, c, h, w = input_img.shape
-            h_n = (128 - h % 128) % 128
-            w_n = (128 - w % 128) % 128
+            h_n = (64 - h % 64) % 64
+            w_n = (64 - w % 64) % 64
             input_img = torch.nn.functional.pad(input_img, (0, w_n, 0, h_n), mode='reflect')
 
             pred = model(input_img)

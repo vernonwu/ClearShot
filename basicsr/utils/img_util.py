@@ -129,7 +129,7 @@ def padding(img_lq, img_gt, gt_size):
 
     h_pad = max(0, gt_size - h)
     w_pad = max(0, gt_size - w)
-    
+
     if h_pad == 0 and w_pad == 0:
         return img_lq, img_gt
 
