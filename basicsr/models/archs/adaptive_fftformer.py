@@ -37,10 +37,9 @@ class Adaptive_FFTFormer(fftformer):
                  conv_inplane=48,
                  patch_size = 8,
                  n_points=4,
-                 deform_num_heads=1,
+                 deform_num_heads=6,
                  init_values=0.,
                  interaction_indexes=[[0, 0], [1, 2],[3, 4]],
-                 with_cffn= False,
                  with_cffn= False,
                  cffn_ratio=0.25,
                  deform_ratio=1.0,
@@ -70,12 +69,10 @@ class Adaptive_FFTFormer(fftformer):
 
         self.interactions = nn.Sequential(*[
             InteractionBlock(dim=dim*2**i, num_heads=deform_num_heads, n_points=n_points,
-            InteractionBlock(dim=dim*2**i, num_heads=deform_num_heads, n_points=n_points,
                              init_values=init_values, drop_path=self.drop_path_rate,
                              with_cffn=with_cffn, norm_layer=partial(nn.LayerNorm, eps=1e-6),
                              cffn_ratio=cffn_ratio, deform_ratio=deform_ratio, extra_extractor= False,
                              patch_merge = (False if i == 0 else True),
-                             with_cp=with_cp, with_extractor = (False if i == 2 else True), patch_size = patch_size)
                              with_cp=with_cp, with_extractor = (False if i == 2 else True), patch_size = patch_size)
             for i in range(len(interaction_indexes))
         ])
