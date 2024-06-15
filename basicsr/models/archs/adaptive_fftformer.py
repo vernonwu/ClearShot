@@ -11,6 +11,7 @@ from basicsr.models.archs.adapter import deform_inputs
 from timm.models.layers import trunc_normal_
 import math
 from basicsr.models.archs.ms_deform_attn import MSDeformAttn
+import torch.utils.checkpoint as cp
 
 class OverlapPatchEmbed(nn.Module):
     def __init__(self, in_c=3, embed_dim=48, bias=False):
@@ -36,7 +37,7 @@ class Adaptive_FFTFormer(nn.Module):
                  conv_inplane=48,
                  patch_size = 8,
                  n_points=4,
-                 deform_num_heads=6,
+                 deform_num_heads=1,
                  init_values=0.,
                  interaction_indexes=[[0, 0], [1, 2],[3, 4]],
                  with_cffn= False,
@@ -45,7 +46,7 @@ class Adaptive_FFTFormer(nn.Module):
                  add_vit_feature=True,
                  pretrained=None,
                  use_extra_extractor=True,
-                 with_cp=False,
+                 with_cp= False,
                  *args,
                  **kwargs):
         super(Adaptive_FFTFormer, self).__init__()

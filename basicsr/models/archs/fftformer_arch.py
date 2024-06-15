@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numbers
 from einops import rearrange
+import torch.utils.checkpoint as cp
 
 
 def to_3d(x):
@@ -81,19 +82,25 @@ class DFFN(nn.Module):
         self.project_out = nn.Conv2d(hidden_features, dim, kernel_size=1, bias=bias)
 
     def forward(self, x):
-        x = self.project_in(x)
-        x_patch = rearrange(x, 'b c (h patch1) (w patch2) -> b c h w patch1 patch2', patch1=self.patch_size,
-                            patch2=self.patch_size)
-        x_patch_fft = torch.fft.rfft2(x_patch.float())
-        x_patch_fft = x_patch_fft * self.fft
-        x_patch = torch.fft.irfft2(x_patch_fft, s=(self.patch_size, self.patch_size))
-        x = rearrange(x_patch, 'b c h w patch1 patch2 -> b c (h patch1) (w patch2)', patch1=self.patch_size,
-                      patch2=self.patch_size)
-        x1, x2 = self.dwconv(x).chunk(2, dim=1)
 
-        x = F.gelu(x1) * x2
-        x = self.project_out(x)
-        return x
+        def _inner_forward(x,patch_size):
+            x = self.project_in(x)
+            x_patch = rearrange(x, 'b c (h patch1) (w patch2) -> b c h w patch1 patch2', patch1 = patch_size,
+                                patch2 = patch_size)
+            x_patch_fft = torch.fft.rfft2(x_patch.float())
+            x_patch_fft = x_patch_fft * self.fft
+            x_patch = torch.fft.irfft2(x_patch_fft, s=(patch_size, patch_size))
+            x = rearrange(x_patch, 'b c h w patch1 patch2 -> b c (h patch1) (w patch2)', patch1 = patch_size,
+                        patch2 = patch_size)
+            x1, x2 = self.dwconv(x).chunk(2, dim=1)
+
+            x = F.gelu(x1) * x2
+            return self.project_out(x)
+        
+        if x.requires_grad:
+            return cp.checkpoint(_inner_forward, x, self.patch_size)
+        
+        return _inner_forward(x, self.patch_size)
 
 
 class FSAS(nn.Module):
@@ -110,28 +117,35 @@ class FSAS(nn.Module):
         self.patch_size = 8
 
     def forward(self, x):
-        hidden = self.to_hidden(x)
 
-        q, k, v = self.to_hidden_dw(hidden).chunk(3, dim=1)
+        def _inner_forward(x,patch_size):
 
-        q_patch = rearrange(q, 'b c (h patch1) (w patch2) -> b c h w patch1 patch2', patch1=self.patch_size,
-                            patch2=self.patch_size)
-        k_patch = rearrange(k, 'b c (h patch1) (w patch2) -> b c h w patch1 patch2', patch1=self.patch_size,
-                            patch2=self.patch_size)
-        q_fft = torch.fft.rfft2(q_patch.float())
-        k_fft = torch.fft.rfft2(k_patch.float())
+            hidden = self.to_hidden(x)
 
-        out = q_fft * k_fft
-        out = torch.fft.irfft2(out, s=(self.patch_size, self.patch_size))
-        out = rearrange(out, 'b c h w patch1 patch2 -> b c (h patch1) (w patch2)', patch1=self.patch_size,
-                        patch2=self.patch_size)
+            q, k, v = self.to_hidden_dw(hidden).chunk(3, dim=1)
 
-        out = self.norm(out)
+            q_patch = rearrange(q, 'b c (h patch1) (w patch2) -> b c h w patch1 patch2', patch1=patch_size,
+                                patch2=patch_size)
+            k_patch = rearrange(k, 'b c (h patch1) (w patch2) -> b c h w patch1 patch2', patch1=patch_size,
+                                patch2=patch_size)
+            q_fft = torch.fft.rfft2(q_patch.float())
+            k_fft = torch.fft.rfft2(k_patch.float())
 
-        output = v * out
-        output = self.project_out(output)
+            out = q_fft * k_fft
+            out = torch.fft.irfft2(out, s=(patch_size, patch_size))
+            out = rearrange(out, 'b c h w patch1 patch2 -> b c (h patch1) (w patch2)', patch1=patch_size,
+                            patch2=patch_size)
 
-        return output
+            out = self.norm(out)
+
+            output = v * out
+            return self.project_out(output)
+        
+        if x.requires_grad:
+            return cp.checkpoint(_inner_forward, x, self.patch_size)
+        
+        return _inner_forward(x, self.patch_size)
+
 
 
 ##########################################################################
