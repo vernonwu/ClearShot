@@ -101,7 +101,7 @@ def _eval(model, data_dir, result_dir, pred=True, save_image=True):
         # if pred:
         #     input_img, name = data
         # else:
-        print(data)
+
         input_img, label_img, name = data
 
         input_img = input_img.to(device)
@@ -124,7 +124,6 @@ def _eval(model, data_dir, result_dir, pred=True, save_image=True):
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-
 
         if not pred:
             crop_border = 4

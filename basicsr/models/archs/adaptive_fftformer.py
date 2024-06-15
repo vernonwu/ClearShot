@@ -11,6 +11,7 @@ from basicsr.models.archs.adapter import deform_inputs
 from timm.models.layers import trunc_normal_
 import math
 from basicsr.models.archs.ms_deform_attn import MSDeformAttn
+import torch.utils.checkpoint as cp
 
 class OverlapPatchEmbed(nn.Module):
     def __init__(self, in_c=3, embed_dim=48, bias=False):
@@ -36,16 +37,17 @@ class Adaptive_FFTFormer(fftformer):
                  conv_inplane=48,
                  patch_size = 8,
                  n_points=4,
-                 deform_num_heads=6,
+                 deform_num_heads=1,
                  init_values=0.,
                  interaction_indexes=[[0, 0], [1, 2],[3, 4]],
+                 with_cffn= False,
                  with_cffn= False,
                  cffn_ratio=0.25,
                  deform_ratio=1.0,
                  add_vit_feature=True,
                  pretrained=None,
                  use_extra_extractor=True,
-                 with_cp=False,
+                 with_cp= False,
                  *args,
                  **kwargs):
         super(Adaptive_FFTFormer, self).__init__()
@@ -63,13 +65,17 @@ class Adaptive_FFTFormer(fftformer):
 
         self.spm = SpatialPriorModule(inplanes=conv_inplane, embed_dim=dim)
         self.level_embed = nn.Parameter(torch.zeros(3, dim))
+        self.spm = SpatialPriorModule(inplanes=conv_inplane, embed_dim=dim)
+        self.level_embed = nn.Parameter(torch.zeros(3, dim))
 
         self.interactions = nn.Sequential(*[
+            InteractionBlock(dim=dim*2**i, num_heads=deform_num_heads, n_points=n_points,
             InteractionBlock(dim=dim*2**i, num_heads=deform_num_heads, n_points=n_points,
                              init_values=init_values, drop_path=self.drop_path_rate,
                              with_cffn=with_cffn, norm_layer=partial(nn.LayerNorm, eps=1e-6),
                              cffn_ratio=cffn_ratio, deform_ratio=deform_ratio, extra_extractor= False,
                              patch_merge = (False if i == 0 else True),
+                             with_cp=with_cp, with_extractor = (False if i == 2 else True), patch_size = patch_size)
                              with_cp=with_cp, with_extractor = (False if i == 2 else True), patch_size = patch_size)
             for i in range(len(interaction_indexes))
         ])
@@ -79,7 +85,6 @@ class Adaptive_FFTFormer(fftformer):
         self.norm2 = nn.SyncBatchNorm(dim*2)
         self.norm3 = nn.SyncBatchNorm(dim*4)
         self.adapter_patch_embed = OverlapPatchEmbed(self.pretrained_model.inp_channels, dim)
-
         self.blocks = nn.Sequential(*
             [self.encoder_level1,
             self.down1_2, self.encoder_level2,
@@ -126,7 +131,7 @@ class Adaptive_FFTFormer(fftformer):
         for name, param in pretrained_state_dict.items():
             model_state_dict[name].copy_(param)
             model_state_dict[name].requires_grad = False
-        self.load_state_dict(model_state_dict)
+        self.pretrained_model.load_state_dict(model_state_dict)
 
     def _init_deform_weights(self, m):
         if isinstance(m, MSDeformAttn):

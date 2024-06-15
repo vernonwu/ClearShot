@@ -24,6 +24,7 @@ class Downsample(nn.Module):
         self.downsample = nn.Conv2d(dim, dim, kernel_size=reduction_factor, stride=reduction_factor, padding=0, bias=False)
 
     def forward(self, x):
+        # return cp.checkpoint(self.downsample, x)
         return self.downsample(x)
 
 class Upsample(nn.Module):
@@ -32,6 +33,7 @@ class Upsample(nn.Module):
         self.upsample = nn.ConvTranspose2d(dim, dim, kernel_size=expansion_factor, stride=expansion_factor, padding=0, bias=False)
 
     def forward(self, x):
+        # return cp.checkpoint(self.upsample, x)
         return self.upsample(x)
 
 class PatchMerging(nn.Module):
@@ -44,12 +46,6 @@ class PatchMerging(nn.Module):
 
     def forward(self, x):
         B, N, C = x.shape
-
-        # Pad if necessary to make N a multiple of 4
-        if N % 4 != 0:
-            padding_size = 4 - (N % 4)
-            x = nn.functional.pad(x, (0, 0, 0, padding_size))
-            N += padding_size
 
         # Reshape to [B, N/4, 4C]
         x = x.contiguous().view(B, N // 4, 4 * C)

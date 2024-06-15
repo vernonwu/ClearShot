@@ -107,7 +107,7 @@ def _eval(model, args):
 
             # Calculate PSNR
             label_img = label_img.to(device)
-            crop_border = 128
+            crop_border = 4
             psnr = calculate_psnr(label_img, pred_clip,crop_border=crop_border)
             psnr_scores.append(psnr)
             # Calculate SSIM
